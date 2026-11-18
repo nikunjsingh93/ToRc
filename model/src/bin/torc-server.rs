@@ -762,7 +762,9 @@ fn supervise(a: &[String], port: u16, idle: u64) {
                         let _ = c.kill();
                         let _ = c.wait();
                     }
-                    eprintln!("torc-server: no request for {idle} s: the model is unloaded (the next request loads it)");
+                    eprintln!(
+                        "torc-server: no request for {idle} s: the model is unloaded (the next request loads it)"
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }

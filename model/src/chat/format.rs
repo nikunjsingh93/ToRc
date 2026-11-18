@@ -81,7 +81,11 @@ pub fn props<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
 /// A call's argument written as text: kept as text when its schema says string (or gives no type), otherwise parsed as
 /// JSON when it parses.
 pub fn value(props: Option<&Value>, key: &str, v: &str) -> Value {
-    if is_text(props, key) { Value::String(v.into()) } else { serde_json::from_str(v).unwrap_or(Value::String(v.into())) }
+    if is_text(props, key) {
+        Value::String(v.into())
+    } else {
+        serde_json::from_str(v).unwrap_or(Value::String(v.into()))
+    }
 }
 
 /// Whether `value` keeps a call's argument as text: its schema says string (or gives no type).
