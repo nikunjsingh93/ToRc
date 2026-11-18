@@ -8,9 +8,9 @@
 ## Current State
 
 Branch `custom` (based on upstream v0.1.5, commit e93e4c0) builds on Windows ARM64 and runs the fork's four additions,
-all tested live with Qwen3.6-35B-A3B Q4_0 (NPU + GPU): streamed tool calls, idle unload, `TORC_MAX_TOKENS`, and native
 image input (`TORC_MMPROJ`, merged from branch `vision`). `custom` and `vision` are pushed to origin
-(github.com/nikunjsingh93/ToRc). The user's two ToRc launchers run this build; vision is off in them until
+(github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B and 27B) run this build with vision on
+(`TORC_MMPROJ` is set in both; the 27B uses its own F16 mmproj). The desktop app is untouched.
 own F16 mmproj). The desktop app is untouched.
 
 ## Recently Completed
