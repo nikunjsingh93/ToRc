@@ -154,3 +154,45 @@ file for the same model, used from the server's next start ([AUTOTUNE.md](AUTOTU
 - **NPU errors:** run `npucheck`; set `TORC_NPU_DIR` to the ggml build with the Hexagon backend.
 - **Two machines hang or refuse:** both must run the same ToRc build and the same model file; the worker logs why it
   refused.
+
+---
+
+# Developing this fork (nikunjsingh93/ToRc)
+
+Everything above is upstream's guide for agents helping a user run ToRc, kept as upstream wrote it. This section is
+for agents (Codex, Claude Code, OpenCode, Pi Agent and others) working on this fork's code. It is the fork's own
+addition: keep it at the end of the file so merges from upstream stay simple.
+
+## Starting a session
+
+Before making changes:
+
+1. Read [.ai/PROJECT.md](.ai/PROJECT.md) for the fork's architecture, decisions and pitfalls.
+2. Read [.ai/HANDOFF.md](.ai/HANDOFF.md) for recent work, open issues and the next steps.
+3. Check `git status`, `git log --oneline -10` and the branch (`custom` holds the fork's changes, `main` mirrors
+   upstream), and inspect the relevant source files, to confirm the documented state is still accurate.
+4. Continue from the latest confirmed state instead of starting over.
+
+## During development
+
+- Follow upstream's rules in [CONTRIBUTING.md](CONTRIBUTING.md): new behaviour off by default behind a `TORC_*` switch
+  listed in [SWITCHES.md](SWITCHES.md), switches read only through `kernels/src/switches.rs`, comments that say what
+  the code does and why (no dates or benchmark numbers in comments), lines within 120 columns.
+- Follow existing patterns; prefer small changes to existing code over rewrites. Keep the fork's diff against upstream
+  small, so upstream releases can be merged in.
+- Preserve unrelated user changes. Never commit secrets (API keys, passwords) or private machine details.
+- Record important technical decisions, discoveries and failed approaches in `.ai/PROJECT.md`.
+- If the docs and the code disagree, the code and the tests are the source of truth: fix the docs.
+
+## Ending a session
+
+After a substantial task, or when asked to hand off, update `.ai/HANDOFF.md`:
+
+- what was completed and what is unfinished;
+- the important files changed;
+- known bugs and blockers;
+- the commands run and their actual results;
+- the specific next step for the next agent.
+
+Keep the notes concise and accurate. Do not claim something was tested unless the test actually ran. Do not overwrite
+earlier findings in `.ai/PROJECT.md` without checking whether they still hold.
