@@ -12,7 +12,8 @@ additions, all tested live with Qwen3.6-35B-A3B Q4_0 (NPU + GPU): streamed tool 
 `TORC_MAX_TOKENS`. The user's two ToRc launchers use this build. `custom` is pushed to origin
 (github.com/nikunjsingh93/ToRc). The desktop app is untouched.
 
-Native vision for the 35B was researched but not started: see [VISION.md](VISION.md). No vision code exists yet.
+Native vision for the 35B is implemented on branch `vision` (off unless `TORC_MMPROJ` names the mmproj file) and works on
+the Q4_0 35B with the NPU + GPU: see [VISION.md](VISION.md). Not merged into `custom` yet.
 
 ## Recently Completed
 
@@ -77,10 +78,7 @@ All on this machine (Snapdragon X2 Elite Extreme, Windows 11 ARM64, 48 GB):
 
 ## Next Steps
 
-1. **Native vision for Qwen3.6-35B (the user's next goal).** Start with [VISION.md](VISION.md): first settle the items
-   in its section 2 ("Not yet verified") against llama.cpp's C++ sources or transformers, and get reference outputs
-   (its plan step 1), before writing the encoder. Work on a new branch off `custom` (e.g. `vision`), keep it off by
-   default, and keep text-only output bit-identical.
+1. **Native vision for Qwen3.6-35B: finish.** Done on `vision` (see VISION.md): tower, preprocessing, M-RoPE, reuse, three APIs. Tested since: a generated 1920x1080 code screenshot as PNG and JPEG (18 x 31 = 558 rows) was transcribed exactly; encoding took 11-12 s at first and 3.9 s after the tower was optimised (NEON tile kernel, transposed-V attention on the same tile, parallel layer norm/GELU/adds; a 4x4 tile of intrinsics was the big win, cache blocking made it slower); the 800x300 image takes 1.2 s. Still open: compare the image rows with llama.cpp numerically; the Anthropic and Responses image paths are untested; NPU/GPU tiers were on in the test and worked; pipeline (two machines) is not supported with images; images are not saved in on-disk chat states; then merge `vision` into `custom`.
 2. Stream tool calls on the Anthropic messages and OpenAI Responses APIs too (MessagesStream / ResponsesStream need
    incremental tool-call events), and consider the GLM and LFM2 formats.
 3. Consider offering the changes upstream as separate PRs (one change per PR, per CONTRIBUTING.md), with the

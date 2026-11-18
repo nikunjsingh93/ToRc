@@ -577,7 +577,7 @@ impl Model {
         kops::dequantize(emb.t.ty, &emb.data[token as usize * rb..(token as usize + 1) * rb], &mut x);
         let half = (h.n_rot / 2) as usize;
         let (mut cs, mut sn) = (vec![0.0f32; half], vec![0.0f32; half]);
-        rope_row(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
+        crate::vision::rope_slot(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
         let mut xn = vec![0.0f32; dm];
         let mut xq = Q8::new(dm / QK);
         let trace = crate::switches::get("TORC_TRACE").is_some_and(|v| v != "0");
@@ -748,6 +748,13 @@ impl Model {
         let rb = emb.row_bytes();
         self.px.resize(n * dm, 0.0);
         for (t, &tok) in tokens.iter().enumerate() {
+            // an image row (vision.rs): its encoded row stands in for the token's embedding
+            if crate::vision::is_row(tok) {
+                if !crate::vision::copy_row(tok, &mut self.px[t * dm..(t + 1) * dm]) {
+                    return err("an image in the prompt is no longer known to the server");
+                }
+                continue;
+            }
             if tok as usize >= emb.shape().1 {
                 return err("token out of range");
             }

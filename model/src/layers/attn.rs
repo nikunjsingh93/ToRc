@@ -501,7 +501,7 @@ pub fn attn_fill_kv(
         let (mut cs, mut sn) = (vec![0.0f32; half], vec![0.0f32; half]);
         for t in c * 8..(c * 8 + 8).min(n) {
             let pos = pos0 + t as u32;
-            crate::ops::rope_row(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
+            crate::vision::rope_slot(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
             // SAFETY: token t's row of kk and its cache rows (position pos, every KV head) belong to this task alone
             unsafe {
                 let row = KvRow {
@@ -557,7 +557,7 @@ fn attn_block_core(
         let (mut cs, mut sn) = (vec![0.0f32; half], vec![0.0f32; half]);
         for t in c * 8..(c * 8 + 8).min(n) {
             let pos = pos0 + t as u32;
-            crate::ops::rope_row(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
+            crate::vision::rope_slot(&mut cs, &mut sn, pos, h.n_rot, h.rope_base);
             // SAFETY: token t's rows of q, gate and kk, and its cache rows (position pos, every KV head), are touched
             // by this task alone
             unsafe {

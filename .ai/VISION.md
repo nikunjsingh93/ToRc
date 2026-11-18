@@ -1,7 +1,19 @@
 # Native vision for Qwen3.6-35B-A3B in ToRc - research notes
 
-Status: not started. No vision code exists in ToRc (upstream lists "Vision" under future work in README.md). This
-file collects what was found before starting, split into what was verified and what still has to be checked.
+Status: implemented on branch `vision` (switch `TORC_MMPROJ`, off by default) and working end to end on the Q4_0 35B:
+the 800 x 300 test image below is read correctly (every text, colours, button), a second turn reuses the kept prompt
+(241 of 279 tokens cached) and text-only requests are unchanged. Not yet compared number-for-number against
+llama.cpp's image embeddings (plan step 1), only by answers. Code: `model/src/models/qwen/vision.rs` (tower, image
+preprocessing, image ids, M-RoPE positions), hooks in `forward.rs` (`std_embed`), `layers/attn.rs` (`rope_slot`),
+`qwen/serve.rs` (loading, expansion, positions), `chat/format.rs` and the three API parsers (image parts).
+
+Section 2 below was settled from the transformers and llama.cpp sources (read through the web, not run) and by the
+result: positions are interleaved (pair s % 3: 0 time, 1 height, 2 width), image rows take time = base, height = base +
+row, width = base + column, text after continues at base + max(rows, cols); the tower uses 2-D RoPE (head dim 72: pairs
+(i, i + 36), the first 18 take the patch row and the last 18 its column, frequencies 10000^(-j/18)), full attention in
+every block, scale 72^-0.5, tanh-GELU, LayerNorm eps 1e-6, the 48 x 48 position table bilinearly resampled with
+corners aligned, patches in 2 x 2 window order, a still image as the two time kernels added. The size budget is ours:
+sides in multiples of 32, at most `TORC_VISION_TOKENS` merged rows (default 576), CatmullRom resize.
 
 Goal: images (screenshots first) in chat requests to `torc-server` for the Qwen3.6-35B-A3B model, giving the same
 answers llama.cpp gives with the model's mmproj file, without changing anything for text-only requests.
