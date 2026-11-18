@@ -21,7 +21,7 @@ use super::sample::Sampling;
 use crate::api;
 use crate::chat::json_calls;
 use crate::plan::{Plans, conf};
-use crate::serve::{Reply, Serve, defused, defused_tools};
+use crate::serve::{CallPiece, Reply, Serve, defused, defused_tools};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::io::Write;
@@ -404,9 +404,11 @@ impl Engine {
         think: bool,
         sp: &mut Sampling,
         emit: &mut dyn FnMut(bool, &str) -> bool,
+        tools: &[Value],
+        on_call: &mut dyn FnMut(CallPiece) -> bool,
     ) -> format::Result<(usize, usize, usize, &'static str, Vec<String>)> {
         self.touched = false;
-        let r = self.run_seq(base, opener, max, think, sp, emit);
+        let r = self.run_seq(base, opener, max, think, sp, emit, tools, on_call);
         if let Err(e) = &r
             && self.touched
         {
@@ -513,6 +515,8 @@ impl Engine {
         think: bool,
         sp: &mut Sampling,
         emit: &mut dyn FnMut(bool, &str) -> bool,
+        tools: &[Value],
+        on_call: &mut dyn FnMut(CallPiece) -> bool,
     ) -> format::Result<(usize, usize, usize, &'static str, Vec<String>)> {
         // a SentencePiece model's BOS first (llama.cpp adds it the same way)
         let bt: Vec<u32> = self.tok.bos().into_iter().chain(self.tok.encode(base, true)?).collect();
@@ -768,6 +772,10 @@ impl Engine {
         let (mut inside, mut nthink, mut trim) = (think, 0usize, false);
         // the calls the reply makes: the body of each <tool_call> .. </tool_call>, kept out of the text
         let (mut calls, mut call, mut in_tool) = (Vec::<String>::new(), Vec::<u8>::new(), false);
+        // the Qwen format's calls also go out piece by piece while they are written (reply_calls), numbered as the
+        // calls that read as calls are; the other formats' come whole at the end
+        let streams = chat() == Chat::Qwen;
+        let (mut cs, mut ncalls) = (None::<super::chat::CallStream>, 0usize);
         // a model with no tool-call tokens writes its calls as text: they are found in what would be sent
         let mut text_calls = matches!(chat(), Chat::Ernie | Chat::Kimi).then(json_calls::TextCalls::default);
         // the reply's own timing starts as the first token goes out. The time to it includes the pipelined
@@ -785,11 +793,30 @@ impl Engine {
             if Some(t) == self.tool_start && !inside {
                 in_tool = true;
                 call.clear();
+                if streams {
+                    cs = Some(super::chat::CallStream::new(ncalls));
+                }
             } else if Some(t) == self.tool_end && in_tool {
                 in_tool = false;
                 calls.push(String::from_utf8_lossy(&call).into_owned());
+                // a body that never named its function is not a call, and takes no number
+                if cs.take().is_some_and(|s| s.started()) {
+                    ncalls += 1;
+                }
             } else if in_tool {
                 call.extend(self.tok.decode(t));
+                if let Some(s) = cs.as_mut() {
+                    let ok = match std::str::from_utf8(&call) {
+                        Ok(b) => b.len(),
+                        Err(e) => e.valid_up_to(),
+                    };
+                    let body = std::str::from_utf8(&call[..ok]).unwrap_or("");
+                    if !s.feed(body, tools, on_call) {
+                        eprintln!("torc-server: reply {rn}: the client closed the connection; stopped");
+                        reason = "stop";
+                        break;
+                    }
+                }
             } else if Some(t) == self.reason_start {
                 // the tag itself is not text; a model that opens its own reasoning (LFM2) reasons from here
                 inside = true;
@@ -970,6 +997,15 @@ impl Serve for Engine {
     }
 
     fn reply(&mut self, c: &api::Chat, emit: &mut dyn FnMut(bool, &str) -> bool) -> format::Result<Reply> {
+        self.reply_calls(c, emit, &mut |_| true)
+    }
+
+    fn reply_calls(
+        &mut self,
+        c: &api::Chat,
+        emit: &mut dyn FnMut(bool, &str) -> bool,
+        on_call: &mut dyn FnMut(CallPiece) -> bool,
+    ) -> format::Result<Reply> {
         let seed = c.seed.unwrap_or_else(|| {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
         });
@@ -991,7 +1027,8 @@ impl Serve for Engine {
         } else {
             "<think>\n\n</think>\n\n"
         };
-        let (prompt, output, reasoning, finish, calls) = self.run(&text, opener, c.max, think, &mut sp, emit)?;
+        let (prompt, output, reasoning, finish, calls) =
+            self.run(&text, opener, c.max, think, &mut sp, emit, &c.tools, on_call)?;
         let calls = match chat() {
             Chat::Qwen => super::chat::read(&calls, &c.tools),
             Chat::Glm => crate::models::glm::chat::read(&calls, &c.tools),

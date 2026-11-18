@@ -1,8 +1,8 @@
 //! chat.rs - the Qwen models' chat format: ChatML, with tools written the way the Qwen3.5 / 3.6 chat template writes
 //! them (its XML dialect), and the reader of the calls a reply makes in it.
 
-use crate::chat::format::{props, text_of, tojson, tool_answers, value};
-use crate::serve::Call;
+use crate::chat::format::{is_text, props, text_of, tojson, tool_answers, value};
+use crate::serve::{Call, CallPiece};
 use serde_json::{Map, Value};
 
 /// The tags a call is written between: tokens in the Qwen vocabularies.
@@ -117,6 +117,124 @@ pub fn read(bodies: &[String], tools: &[Value]) -> Vec<Call> {
             Some(Call { name: name.to_string(), args })
         })
         .collect()
+}
+
+/// A call's arguments as far as they can be known while its body is still being written: the start of the JSON text
+/// `read` gives the finished call (`Value::Object(args).to_string()`), with the tool's name. A text argument comes as
+/// it is written, held back only where what follows could still be its closing "\n</parameter>"; any other comes whole
+/// once its </parameter> is there; the closing brace once </function> is. None before the name is complete.
+pub fn args_so_far(body: &str, tools: &[Value]) -> Option<(String, String)> {
+    const CLOSE: &str = "\n</parameter>";
+    let f = body.find("<function=")? + 10;
+    let gt = f + body[f..].find('>')?;
+    let name = &body[f..gt];
+    let props = props(tools, name);
+    let mut json = String::from("{");
+    let mut p = gt + 1;
+    loop {
+        let Some(q) = body[p..].find("<parameter=") else {
+            if body[p..].contains("</function>") {
+                json.push('}');
+            }
+            break;
+        };
+        let q = p + q + 11;
+        let Some(kg) = body[q..].find('>').map(|x| q + x) else { break };
+        let key = &body[q..kg];
+        if json.len() > 1 {
+            json.push(',');
+        }
+        json += &Value::String(key.into()).to_string();
+        json.push(':');
+        let v0 = kg + 1;
+        if let Some(ve) = body[v0..].find("</parameter>").map(|x| v0 + x) {
+            let v = body[v0..ve].strip_prefix('\n').unwrap_or(&body[v0..ve]);
+            let v = v.strip_suffix('\n').unwrap_or(v);
+            json += &value(props, key, v).to_string();
+            p = ve + 12;
+            continue;
+        }
+        if is_text(props, key) {
+            let raw = body[v0..].strip_prefix('\n').unwrap_or(&body[v0..]);
+            // the longest end of what is there that could still be the start of "\n</parameter>"
+            let hold = (1..=raw.len().min(CLOSE.len()))
+                .rev()
+                .find(|&n| raw.is_char_boundary(raw.len() - n) && CLOSE.starts_with(&raw[raw.len() - n..]))
+                .unwrap_or(0);
+            let open = Value::String(raw[..raw.len() - hold].into()).to_string();
+            // the escaped text without its closing quote: its start is the start of the whole value's
+            json += &open[..open.len() - 1];
+        }
+        break;
+    }
+    Some((name.to_string(), json))
+}
+
+/// The pieces of one call to hand on as its body grows: its start once the name is known, then what its arguments'
+/// text has gained since the last time.
+#[derive(Default)]
+pub struct CallStream {
+    pub index: usize,
+    started: bool,
+    sent: String,
+}
+
+impl CallStream {
+    pub fn new(index: usize) -> CallStream {
+        CallStream { index, ..Default::default() }
+    }
+
+    /// The body as written so far; `hand` gets the new pieces and returns false once the client has gone.
+    pub fn feed(&mut self, body: &str, tools: &[Value], hand: &mut dyn FnMut(CallPiece) -> bool) -> bool {
+        let Some((name, json)) = args_so_far(body, tools) else { return true };
+        if !self.started {
+            self.started = true;
+            if !hand(CallPiece::Start { index: self.index, name: &name }) {
+                return false;
+            }
+        }
+        // the text only ever grows at its end; a body that went back on itself (it can't, as read) hands nothing
+        if json.len() > self.sent.len() && json.starts_with(self.sent.as_str()) {
+            let new = json[self.sent.len()..].to_string();
+            self.sent = json;
+            return hand(CallPiece::Args { index: self.index, text: &new });
+        }
+        true
+    }
+
+    /// Whether this call was started (its name handed on).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Feeding a body a byte at a time hands pieces that join to exactly the finished call's arguments.
+    #[test]
+    fn pieces_join_to_the_finished_arguments() {
+        let tools = vec![json!({"type": "function", "function": {"name": "calc", "parameters": {"properties": {
+            "n": {"type": "integer"}, "opts": {"type": "object"}, "text": {"type": "string"}}}}})];
+        let body = "\n<function=calc>\n<parameter=text>\nline one\n  \"quoted\" \\ back\n\n</parameter>\n\
+                    <parameter=n>\n42\n</parameter>\n<parameter=opts>\n{\"a\": [1, 2]}\n</parameter>\n</function>\n";
+        let mut cs = CallStream::new(0);
+        let (mut name, mut args) = (String::new(), String::new());
+        for end in (1..=body.len()).filter(|&i| body.is_char_boundary(i)) {
+            cs.feed(&body[..end], &tools, &mut |p| {
+                match p {
+                    CallPiece::Start { name: n, .. } => name = n.to_string(),
+                    CallPiece::Args { text, .. } => args += text,
+                }
+                true
+            });
+        }
+        let done = read(&[body.to_string()], &tools);
+        assert_eq!(name, "calc");
+        assert_eq!(args, Value::Object(done[0].args.clone()).to_string());
+    }
 }
 
 #[cfg(test)]

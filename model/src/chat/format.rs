@@ -81,15 +81,19 @@ pub fn props<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
 /// A call's argument written as text: kept as text when its schema says string (or gives no type), otherwise parsed as
 /// JSON when it parses.
 pub fn value(props: Option<&Value>, key: &str, v: &str) -> Value {
+    if is_text(props, key) { Value::String(v.into()) } else { serde_json::from_str(v).unwrap_or(Value::String(v.into())) }
+}
+
+/// Whether `value` keeps a call's argument as text: its schema says string (or gives no type).
+pub fn is_text(props: Option<&Value>, key: &str) -> bool {
     let schema = props.map(|ps| &ps[key]);
-    let text = match schema.map(|sc| &sc["type"]) {
+    match schema.map(|sc| &sc["type"]) {
         Some(Value::String(t)) => t == "string",
         Some(Value::Array(ts)) => ts.iter().any(|t| t == "string"),
         _ => {
             schema.is_none_or(|sc| !sc["properties"].is_object() && !sc["items"].is_object() && !sc["enum"].is_array())
         }
-    };
-    if text { Value::String(v.into()) } else { serde_json::from_str(v).unwrap_or(Value::String(v.into())) }
+    }
 }
 
 /// The chat and the tools every format's pinned prompt test writes, so the formats are tested on the same thing.

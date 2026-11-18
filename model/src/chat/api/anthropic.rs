@@ -71,7 +71,7 @@ pub fn from_messages(req: &Value) -> Chat {
     Chat {
         msgs: with_system(system, msgs),
         tools,
-        max: req["max_tokens"].as_u64().unwrap_or(super::DEFAULT_MAX as u64) as usize,
+        max: req["max_tokens"].as_u64().unwrap_or_else(super::default_max) as usize,
         stream: req["stream"].as_bool().unwrap_or(false),
         think,
         effort: None,

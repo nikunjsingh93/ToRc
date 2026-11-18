@@ -28,7 +28,7 @@
 //! architecture.
 
 use model::api;
-use model::chat::serve::{Reply, Serve, tool_calls};
+use model::chat::serve::{CallPiece, Reply, Serve, tool_calls};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -377,9 +377,16 @@ fn complete(e: &mut dyn Serve, s: &mut TcpStream, a: Api, c: api::Chat) {
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
         );
     }
-    let Ok(mut out) = s.try_clone() else { return };
-    // a failed write means the client closed the stream, and run then stops the reply
-    let mut send = |t: &str| t.is_empty() || write!(out, "{t}").is_ok() && out.flush().is_ok();
+    let Ok(out) = s.try_clone() else { return };
+    // a failed write means the client closed the stream, and run then stops the reply. Shared, so the reply's text
+    // and its tool calls can both be sent while it is written
+    let out = std::cell::RefCell::new(out);
+    let send = |t: &str| {
+        t.is_empty() || {
+            let mut o = out.borrow_mut();
+            write!(o, "{t}").is_ok() && o.flush().is_ok()
+        }
+    };
     match a {
         Api::Chat => {
             let id = format!(
@@ -392,17 +399,60 @@ fn complete(e: &mut dyn Serve, s: &mut TcpStream, a: Api, c: api::Chat) {
             };
             if c.stream {
                 send(&format!("data: {}\n\n", chunk(json!({"role": "assistant"}), Value::Null)));
-                let r = e.reply(&c, &mut |rs, t| {
-                    let d = if rs { json!({"reasoning_content": t}) } else { json!({"content": t}) };
-                    send(&format!("data: {}\n\n", chunk(d, Value::Null)))
-                });
+                // each call goes out as the model writes it, as llama-server streams them: its id, type and name
+                // first, then its arguments' JSON text in pieces; what each call has sent so far is kept here
+                let sent = std::cell::RefCell::new(Vec::<String>::new());
+                let r = e.reply_calls(
+                    &c,
+                    &mut |rs, t| {
+                        let d = if rs { json!({"reasoning_content": t}) } else { json!({"content": t}) };
+                        send(&format!("data: {}\n\n", chunk(d, Value::Null)))
+                    },
+                    &mut |p| {
+                        let d = match p {
+                            CallPiece::Start { index, name } => {
+                                let mut sent = sent.borrow_mut();
+                                let n = sent.len().max(index + 1);
+                                sent.resize(n, String::new());
+                                json!([{"index": index, "id": format!("call_{index}"), "type": "function",
+                                    "function": {"name": name, "arguments": ""}}])
+                            }
+                            CallPiece::Args { index, text } => {
+                                if let Some(a) = sent.borrow_mut().get_mut(index) {
+                                    a.push_str(text);
+                                }
+                                json!([{"index": index, "function": {"arguments": text}}])
+                            }
+                        };
+                        send(&format!("data: {}\n\n", chunk(json!({"tool_calls": d}), Value::Null)))
+                    },
+                );
                 match r {
                     Ok(Reply { prompt: np, output: nr, reasoning: nt, finish: fin, calls }) => {
-                        if !calls.is_empty() {
-                            send(&format!(
-                                "data: {}\n\n",
-                                chunk(json!({"tool_calls": tool_calls(&calls)}), Value::Null)
-                            ));
+                        // what the finished calls add to what went out while they were written: the rest of a call's
+                        // arguments, or a whole call that was not streamed
+                        let sent = sent.into_inner();
+                        let all = tool_calls(&calls);
+                        for (i, tc) in all.as_array().into_iter().flatten().enumerate() {
+                            let args = tc["function"]["arguments"].as_str().unwrap_or("");
+                            let d = match sent.get(i) {
+                                None => tc.clone(),
+                                Some(so_far) if args.starts_with(so_far.as_str()) => {
+                                    if args.len() == so_far.len() {
+                                        continue;
+                                    }
+                                    json!({"index": i, "function": {"arguments": &args[so_far.len()..]}})
+                                }
+                                Some(so_far) => {
+                                    eprintln!(
+                                        "torc-server: call {i}'s streamed arguments ({} bytes) are not the start of its \
+                                         finished ones; the client has the streamed ones",
+                                        so_far.len()
+                                    );
+                                    continue;
+                                }
+                            };
+                            send(&format!("data: {}\n\n", chunk(json!({"tool_calls": [d]}), Value::Null)));
                         }
                         send(&format!("data: {}\n\n", chunk(json!({}), json!(fin))));
                         // the usage chunk (stream_options.include_usage) has no choices, as OpenAI sends it
@@ -573,6 +623,13 @@ fn main() {
         return;
     }
     let port: u16 = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(8080);
+    // TORC_IDLE_UNLOAD: the model runs in a child process that this one starts on the first request that needs it and
+    // ends after that many seconds without one, so an unused model gives back all its memory (the NPU's buffers too)
+    if let Some(idle) = model::switches::num::<u64>("TORC_IDLE_UNLOAD").filter(|&s| s > 0)
+        && !model::switches::given("TORC_SUPERVISED")
+    {
+        return supervise(&a, port, idle);
+    }
     if !cfg!(feature = "gpu") && model::switches::on("TORC_GPU_ATTN") {
         eprintln!("torc-server: TORC_GPU_ATTN is set, but this build has no GPU tier (--features torc-model/gpu)");
     }
@@ -654,6 +711,296 @@ fn listen(e: &mut dyn Serve, port: u16) {
             }
         }
     }
+}
+
+/// The model's process under a supervisor, and the local port it serves on.
+type ModelProcess = Option<(std::process::Child, u16)>;
+
+/// The server as a supervisor (TORC_IDLE_UNLOAD): it listens on the port, answers /health and /v1/models itself while
+/// no model is loaded, and runs the model in a child torc-server on a private local port, started by the first request
+/// that needs it and ended after `idle` seconds without one. Ending the process is what gives back everything the model
+/// holds, the NPU's buffers included. Requests go through unchanged, one at a time, as the server takes them.
+fn supervise(a: &[String], port: u16, idle: u64) {
+    let host = model::switches::get("TORC_HOST").unwrap_or_else(|| "127.0.0.1".into());
+    let key = model::switches::get("TORC_API_KEY").map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let l = TcpListener::bind((host.as_str(), port)).unwrap_or_else(|err| {
+        eprintln!("torc-server: cannot listen on {host}:{port}: {err}");
+        std::process::exit(1)
+    });
+    // the name and date the child will give the model, so /v1/models reads the same with it loaded or not
+    let name = a.get(5).cloned().unwrap_or_else(|| {
+        std::path::Path::new(&a[1]).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    });
+    let written = std::fs::metadata(&a[1]).and_then(|m| m.modified()).ok();
+    let since = written.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let _ = CREATED.set(since);
+    let needs = if key.is_some() { ", other machines need the API key" } else { "" };
+    eprintln!("torc-server: {name} on {host}:{port}{needs}");
+    eprintln!("torc-server: the model loads on the first request and unloads after {idle} s without one");
+    let _ = l.set_nonblocking(true);
+    let mut child: ModelProcess = None;
+    let mut last = std::time::Instant::now();
+    loop {
+        // a child that ended on its own (a crash, or its window closed) is started again by the next request
+        if let Some((c, _)) = child.as_mut()
+            && !matches!(c.try_wait(), Ok(None))
+        {
+            eprintln!("torc-server: the model's process ended");
+            child = None;
+        }
+        match l.accept() {
+            Ok((c, _)) => {
+                // on Windows an accepted socket inherits the listener's mode
+                let _ = c.set_nonblocking(false);
+                if pass_on(c, &name, key.as_deref(), a, &mut child) {
+                    last = std::time::Instant::now();
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if child.is_some() && last.elapsed().as_secs() >= idle {
+                    if let Some((mut c, _)) = child.take() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                    eprintln!("torc-server: no request for {idle} s: the model is unloaded (the next request loads it)");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(err) => {
+                eprintln!("torc-server: accept: {err}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// One request to the supervisor. Its head is read and checked as `handle` checks it (another site's page refused,
+/// another machine's request without the key refused: the child sees every request as this machine's), /health and
+/// /v1/models are answered here while no model is loaded, and everything else goes to the child, started first when
+/// need be, head and body as they came, with the reply passed back the same way. True when the request used the model.
+fn pass_on(mut s: TcpStream, name: &str, key: Option<&str>, a: &[String], child: &mut ModelProcess) -> bool {
+    let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(60)));
+    let local = s.peer_addr().map(|p| local_peer(p.ip())).unwrap_or(false);
+    let deadline = if key.is_some() && !local { KEYED_HEAD_DEADLINE } else { REQUEST_DEADLINE };
+    let _ = s.set_read_timeout(Some(deadline.min(std::time::Duration::from_secs(10))));
+    // the head, and whatever of the body came with it, kept as read to pass on unchanged
+    let start = std::time::Instant::now();
+    let (mut buf, mut chunk) = (Vec::new(), [0u8; 8192]);
+    let head_len = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if buf.len() > MAX_HEAD || start.elapsed() > deadline {
+            return false;
+        }
+        match s.read(&mut chunk) {
+            Ok(n) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+            _ => return false,
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
+    let mut lines = head.split("\r\n");
+    let (method, path) = {
+        let mut it = lines.next().unwrap_or("").split_whitespace();
+        (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+    };
+    let (mut given, mut foreign) = (Vec::new(), false);
+    for h in lines {
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("origin:") {
+            foreign = !local_origin(v);
+        }
+        if let Some(k) = carried_key(h) {
+            given.push(k.to_string());
+        }
+    }
+    let r = route(&path);
+    if foreign {
+        let why = json!({"error": "requests from another site's web page are refused"}).to_string();
+        respond(&mut s, "403 Forbidden", "application/json", &why);
+        return false;
+    }
+    if method == "GET" && r == "/v1/health" {
+        respond(&mut s, "200 OK", "application/json", r#"{"status":"ok"}"#);
+        return false;
+    }
+    if !allowed(key, local, &given) {
+        respond(&mut s, "401 Unauthorized", "application/json", &key_refused(&path));
+        return false;
+    }
+    // a client's model list (apps poll it) neither loads the model nor counts as use
+    let listing = method == "GET" && (r == "/v1/models" || r.starts_with("/v1/models/"));
+    if listing && child.is_none() {
+        let asked = r.strip_prefix("/v1/models/").map(unescape);
+        match asked {
+            None => {
+                let j = json!({"object": "list", "data": [model_entry(name)]});
+                respond(&mut s, "200 OK", "application/json", &j.to_string());
+            }
+            Some(n) if n == name => respond(&mut s, "200 OK", "application/json", &model_entry(name).to_string()),
+            Some(n) => {
+                let text = format!("no model {n} here: this server runs {name}");
+                let j = json!({"error": {"message": text, "type": "invalid_request_error", "code": "model_not_found"}});
+                respond(&mut s, "404 Not Found", "application/json", &j.to_string());
+            }
+        }
+        return false;
+    }
+    let up = start_model(a, child).and_then(|port| TcpStream::connect(("127.0.0.1", port)).ok());
+    let Some(mut up) = up else {
+        let why = json!({"error": {"message": "the model could not be loaded: see the server's window",
+            "type": "server_error"}});
+        respond(&mut s, "503 Service Unavailable", "application/json", &why.to_string());
+        return false;
+    };
+    if up.write_all(&buf).is_err() {
+        return false;
+    }
+    // the rest of the request (a body longer than what came with the head) goes up as it arrives, on its own thread,
+    // and the reply comes back here until the child closes the connection, as it does after every request
+    let _ = s.set_read_timeout(None);
+    if let (Ok(mut from), Ok(mut to)) = (s.try_clone(), up.try_clone()) {
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from, &mut to);
+            let _ = to.shutdown(std::net::Shutdown::Write);
+        });
+    }
+    let _ = std::io::copy(&mut up, &mut s);
+    let _ = s.flush();
+    let _ = s.shutdown(std::net::Shutdown::Both);
+    let _ = up.shutdown(std::net::Shutdown::Both);
+    !listing
+}
+
+/// The model's process, started when there is none: this program again, with the same model and settings on a free
+/// local port, marked TORC_SUPERVISED so it serves rather than supervises. It is ready when it answers /health, which
+/// it does once the model is loaded. Its log goes to this window. None when it could not be started or ended loading.
+fn start_model(a: &[String], child: &mut ModelProcess) -> Option<u16> {
+    if let Some((c, port)) = child.as_mut()
+        && matches!(c.try_wait(), Ok(None))
+    {
+        return Some(*port);
+    }
+    *child = None;
+    let port = TcpListener::bind(("127.0.0.1", 0)).ok()?.local_addr().ok()?.port();
+    let mut args = vec![a[1].clone(), port.to_string()];
+    args.extend(a.iter().skip(3).cloned());
+    eprintln!("torc-server: loading the model for a request");
+    let mut c = std::process::Command::new(std::env::current_exe().ok()?)
+        .args(&args)
+        .env("TORC_SUPERVISED", "1")
+        .env("TORC_HOST", "127.0.0.1")
+        .env_remove("TORC_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| eprintln!("torc-server: cannot start the model's process: {e}"))
+        .ok()?;
+    #[cfg(windows)]
+    job::tie(&c);
+    let t = std::time::Instant::now();
+    loop {
+        if !matches!(c.try_wait(), Ok(None)) {
+            eprintln!("torc-server: the model's process ended while loading");
+            return None;
+        }
+        if healthy(port) {
+            break;
+        }
+        if t.elapsed() > std::time::Duration::from_secs(1800) {
+            eprintln!("torc-server: the model did not load in 30 minutes");
+            let _ = c.kill();
+            let _ = c.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    eprintln!("torc-server: the model is loaded ({} s)", t.elapsed().as_secs());
+    *child = Some((c, port));
+    Some(port)
+}
+
+/// The model's process tied to the supervisor's on Windows: both in a job that ends its processes when the job's last
+/// handle closes, which the supervisor holds until it ends, however it ends (its window closed, a crash, Task Manager).
+/// Without it, a model left running after its supervisor would keep all its memory with nothing to end it.
+#[cfg(windows)]
+mod job {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        minimum_working_set: usize,
+        maximum_working_set: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    /// JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io_counters: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+    unsafe extern "system" {
+        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(job: *mut c_void, class: i32, info: *const c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+    }
+
+    /// The job, made once and never closed (it closes as this process ends). None when it could not be made.
+    fn the_job() -> Option<usize> {
+        static JOB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        *JOB.get_or_init(|| {
+            // SAFETY: plain calls with a valid, sized limits block; the handle is checked before it is used
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                let mut l = ExtendedLimits::default();
+                l.basic.limit_flags = KILL_ON_JOB_CLOSE;
+                let size = std::mem::size_of::<ExtendedLimits>() as u32;
+                let ok = SetInformationJobObject(job, EXTENDED_LIMIT_INFORMATION, (&raw const l).cast(), size);
+                (ok != 0).then_some(job as usize)
+            }
+        })
+    }
+
+    pub fn tie(child: &std::process::Child) {
+        let tied = the_job().is_some_and(|job| {
+            // SAFETY: the job handle is a live one this process made, and the child's handle is open while it runs
+            unsafe { AssignProcessToJobObject(job as *mut c_void, child.as_raw_handle()) != 0 }
+        });
+        if !tied {
+            eprintln!("torc-server: the model's process could not be tied to this one; end it yourself if this ends");
+        }
+    }
+}
+
+/// Whether a server on this local port answers /health: a whole request, so it is not held waiting for one.
+fn healthy(port: u16) -> bool {
+    let Ok(mut c) = TcpStream::connect(("127.0.0.1", port)) else { return false };
+    let _ = c.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    if c.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    let _ = c.read_to_string(&mut reply);
+    reply.starts_with("HTTP/1.1 200")
 }
 
 // The server's guards that need no socket: which pages count as this machine's, and which errors are the caller's.

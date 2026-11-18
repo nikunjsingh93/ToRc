@@ -121,6 +121,14 @@ pub struct Reply {
     pub calls: Vec<Call>,
 }
 
+/// A piece of a tool call while the model writes it, for a client that shows calls as they are made: the call's start
+/// with its tool's name, then pieces of its arguments' JSON text, which joined are the arguments of the finished call
+/// (the same `index` in Reply::calls, as tool_calls writes them).
+pub enum CallPiece<'a> {
+    Start { index: usize, name: &'a str },
+    Args { index: usize, text: &'a str },
+}
+
 pub trait Serve {
     /// The model's name, as /v1/models lists it.
     fn name(&self) -> &str;
@@ -131,6 +139,18 @@ pub trait Serve {
     /// Reads the request's prompt and writes its reply, handing each piece of text to `emit` (true for reasoning).
     /// `emit` returns false once the client has gone, and the reply stops there.
     fn reply(&mut self, c: &Chat, emit: &mut dyn FnMut(bool, &str) -> bool) -> format::Result<Reply>;
+
+    /// `reply`, also handing the tool calls to `call` piece by piece as they are written. A model family that can't
+    /// read its calls before they end hands none, and its calls come only in the Reply, as with `reply`.
+    fn reply_calls(
+        &mut self,
+        c: &Chat,
+        emit: &mut dyn FnMut(bool, &str) -> bool,
+        call: &mut dyn FnMut(CallPiece) -> bool,
+    ) -> format::Result<Reply> {
+        let _ = call;
+        self.reply(c, emit)
+    }
 
     /// The last prompt's tokens that were not read again.
     fn kept(&self) -> usize;

@@ -24,6 +24,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// spend a thousand or two before it answers, so a small default ends many replies with nothing but reasoning.
 pub const DEFAULT_MAX: usize = 4096;
 
+/// The reply limit for a request that doesn't set one: TORC_MAX_TOKENS when it is set to a number above 0 (clients
+/// such as chat apps often send no max_tokens, and long code answers run past DEFAULT_MAX), else DEFAULT_MAX.
+pub fn default_max() -> u64 {
+    crate::switches::num::<u64>("TORC_MAX_TOKENS").filter(|&n| n > 0).unwrap_or(DEFAULT_MAX as u64)
+}
+
 /// A request in the form the chat completions endpoint takes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chat {
@@ -106,7 +112,7 @@ pub fn from_chat_completions(req: &Value) -> Chat {
     Chat {
         msgs: req["messages"].as_array().cloned().unwrap_or_default(),
         tools: req["tools"].as_array().cloned().unwrap_or_default(),
-        max: req["max_tokens"].as_u64().or(req["max_completion_tokens"].as_u64()).unwrap_or(DEFAULT_MAX as u64)
+        max: req["max_tokens"].as_u64().or(req["max_completion_tokens"].as_u64()).unwrap_or_else(default_max)
             as usize,
         stream: req["stream"].as_bool().unwrap_or(false),
         think,
