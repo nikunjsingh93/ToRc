@@ -12,3 +12,4 @@ pub mod mtp;
 pub mod mtp_hc;
 pub mod sample;
 pub mod serve;
+pub mod vision;

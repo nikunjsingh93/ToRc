@@ -9,11 +9,23 @@ pub fn text_of(m: &Value) -> String {
     content_text(&m["content"])
 }
 
-/// The text of a content value: a string, or the `text` of each part of an array, joined.
+/// The text of a content value: a string, or the `text` of each part of an array, joined. While a vision tower is
+/// loaded, an image part stands in the text as the chat template's image marker (vision::MARKER); otherwise it is left
+/// out.
 pub fn content_text(c: &Value) -> String {
     match c {
         Value::String(t) => t.clone(),
-        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""),
+        Value::Array(parts) => {
+            let vision = crate::vision::enabled();
+            parts
+                .iter()
+                .filter_map(|p| match p["text"].as_str() {
+                    Some(t) => Some(t),
+                    None => (vision && crate::vision::is_image_part(p)).then_some(crate::vision::MARKER),
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        }
         _ => String::new(),
     }
 }

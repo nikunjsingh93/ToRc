@@ -27,7 +27,7 @@ pub use models::gemma::npu_gemma;
 pub use models::gemma::{gemma, gemma_mtp};
 pub use models::gptoss::gptoss;
 pub use models::qwen::hparams::Hparams;
-pub use models::qwen::{forward, hc, hparams, mtp, mtp_hc};
+pub use models::qwen::{forward, hc, hparams, mtp, mtp_hc, vision};
 pub use runtime::{ecache, ecache_own, ep, markfile, pipe, plan, pool, profile, repack, scratch, tune, weights};
 #[cfg(feature = "gpu")]
 pub use tiers::gpu;

@@ -23,9 +23,19 @@ pub fn from_messages(req: &Value) -> Chat {
         };
         let mut text = String::new();
         let mut calls = Vec::new();
+        // the user's words and images in order, when it has images and a vision tower is loaded
+        let mut parts = Vec::new();
+        let mut has_image = false;
         for b in blocks {
             match b["type"].as_str().unwrap_or("") {
-                "text" => text += b["text"].as_str().unwrap_or(""),
+                "text" => {
+                    text += b["text"].as_str().unwrap_or("");
+                    parts.push(json!({"type": "text", "text": b["text"]}));
+                }
+                "image" if crate::vision::enabled() && role != "assistant" => {
+                    has_image = true;
+                    parts.push(b.clone());
+                }
                 // a tool's answer becomes its own message, before the user's words that came with it
                 "tool_result" => {
                     let mut out = content_text(&b["content"]);
@@ -46,6 +56,8 @@ pub fn from_messages(req: &Value) -> Chat {
                 a["tool_calls"] = Value::Array(calls);
             }
             msgs.push(a);
+        } else if has_image {
+            msgs.push(json!({"role": role, "content": parts}));
         } else if !text.is_empty() {
             msgs.push(json!({"role": role, "content": text}));
         }

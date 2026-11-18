@@ -22,6 +22,12 @@ pub fn from_responses(req: &Value) -> Chat {
                 match role {
                     // the system's words, wherever they appear, go first with the instructions
                     "system" | "developer" => system.push(text),
+                    // a user turn with images keeps its parts, so the server can read the images (vision.rs)
+                    _ if crate::vision::enabled()
+                        && it["content"].as_array().is_some_and(|a| a.iter().any(crate::vision::is_image_part)) =>
+                    {
+                        msgs.push(json!({"role": role, "content": it["content"]}))
+                    }
                     _ => msgs.push(json!({"role": role, "content": text})),
                 }
             }

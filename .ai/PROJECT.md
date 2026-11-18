@@ -16,6 +16,7 @@ This fork (https://github.com/nikunjsingh93/ToRc) exists to run ToRc as a local 
 - tool calls streamed while the model writes them (chat completions API, Qwen-format models);
 - the model unloaded after an idle time and loaded again on the next request (`TORC_IDLE_UNLOAD`);
 - a configurable reply limit for requests that send no `max_tokens` (`TORC_MAX_TOKENS`).
+- images in chat requests for Qwen3.6-35B-A3B (`TORC_MMPROJ`, branch `vision`; see VISION.md).
 
 ## Technology Stack
 
@@ -113,8 +114,8 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   bartowski's Qwen3.6-35B Q4_0 GGUF already contains it (`blk.40.nextn.*`).
 - Upstream torc-server's default reply limit is 4096 tokens including thinking; clients that send no `max_tokens`
   get cut off. Set `TORC_MAX_TOKENS`.
-- torc-server serves one conversation at a time and has no vision support yet. Native vision for Qwen3.6-35B is the
-  next planned feature: verified facts, open questions and a step plan are in [VISION.md](VISION.md). Key findings:
+- torc-server serves one conversation at a time. Vision (branch `vision`, `TORC_MMPROJ`) works for Qwen3.6-35B; image rows are ids with the top bit set (vision.rs), M-RoPE positions come from `vision::set_positions` and `rope_slot`; details in VISION.md. It was the
+  fork's last feature; the research notes with the verified facts are in [VISION.md](VISION.md). Key findings:
   the model's mmproj (`qwen3vl_merger`, 27-block ViT, no DeepStack) outputs 2048-d rows; the language model needs
   M-RoPE (`rope.dimension_sections = [11, 11, 10, 0]`) for image tokens while ToRc's RoPE is 1-D; prompt reuse
   compares token ids, so images must become part of the sequence identity.

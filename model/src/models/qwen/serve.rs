@@ -18,6 +18,7 @@
 //! drafts, sampled or greedy.
 
 use super::sample::Sampling;
+use super::vision;
 use crate::api;
 use crate::chat::json_calls;
 use crate::plan::{Plans, conf};
@@ -76,6 +77,11 @@ struct Engine {
     /// the last reply's own timing: prompt tokens read and the seconds reading them, seconds to the first token going
     /// out, reply tokens and their seconds (the usage chunk's `timings`, as llama-server reports them, plus ttft_ms)
     timed: (usize, f64, f64, usize, f64),
+    /// TORC_MMPROJ: the vision tower, with the id of the image placeholder token (<|image_pad|>) that stands for an
+    /// image in the prompt's text
+    mm: Option<(vision::Mmproj, u32)>,
+    /// the request's images as the ids of their rows, in the order of their placeholders in the prompt
+    images: Vec<Vec<u32>>,
 }
 
 /// A reply's MTP state: the next pass's first draft and its confidence, and the block's last hidden row; the tokens of
@@ -153,6 +159,9 @@ impl Engine {
     /// last row, which mtp_start runs in full with the reply's first token, or None if the log does not cover those
     /// positions.
     fn mtp_fill(&mut self, ids: &[u32], start: usize) -> format::Result<Option<Vec<f32>>> {
+        // the MTP block reads an image row as its placeholder token
+        let pad = self.mm.as_ref().map_or(0, |(_, p)| *p);
+        let ids: &[u32] = &ids.iter().map(|&t| vision::text_id(t, pad)).collect::<Vec<u32>>();
         let last = ids.len() - 1;
         let dm = self.m.hidden_width();
         let Some((s0, log)) = self.m.take_hidden_log() else { return Ok(None) };
@@ -432,7 +441,12 @@ impl Engine {
     fn save_leaving(&mut self) {
         const MIN: usize = 512;
         let Some((mt, mk)) = self.mark.take() else { return };
-        if mt.len() < MIN || self.saved.contains(&mt) || crate::markfile::keep() == 0 {
+        // a chat with images is not saved: its image ids mean something only while the server holds the images
+        if mt.len() < MIN
+            || self.saved.contains(&mt)
+            || crate::markfile::keep() == 0
+            || mt.iter().any(|&t| vision::is_row(t))
+        {
             self.mark = Some((mt, mk));
             return;
         }
@@ -519,9 +533,15 @@ impl Engine {
         on_call: &mut dyn FnMut(CallPiece) -> bool,
     ) -> format::Result<(usize, usize, usize, &'static str, Vec<String>)> {
         // a SentencePiece model's BOS first (llama.cpp adds it the same way)
-        let bt: Vec<u32> = self.tok.bos().into_iter().chain(self.tok.encode(base, true)?).collect();
+        let mut bt: Vec<u32> = self.tok.bos().into_iter().chain(self.tok.encode(base, true)?).collect();
+        // each image's placeholder becomes the ids of its rows (vision.rs)
+        if let Some((_, pad)) = &self.mm {
+            bt = vision::expand(&bt, *pad, &std::mem::take(&mut self.images))?;
+        }
         let mut ids = bt.clone();
         ids.extend(self.tok.encode(opener, true)?);
+        // where the images sit, for the positions the attention layers rotate by
+        vision::set_positions(&ids);
         let nd = self.tok.take_dropped();
         if nd > 0 {
             // a vocabulary-sliced model: the prompt is read without these characters, and the log says so rather than
@@ -1013,6 +1033,13 @@ impl Serve for Engine {
         let rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
         let mut sp = Sampling::new(c.temperature, c.top_p, c.top_k.unwrap_or(40), rng);
         sp.penalties(c.presence_penalty, c.frequency_penalty);
+        // the request's images, read now (an image already read is kept: a chat sends its images again each turn)
+        self.images.clear();
+        if let Some((mp, _)) = &self.mm {
+            for bytes in vision::images_of(&c.msgs)? {
+                self.images.push(vision::embed(mp, &bytes, vision::max_rows())?);
+            }
+        }
         let text = self.prompt_of(c);
         let think = c.think.unwrap_or(self.think_default) && self.reasons;
         // a reasoning model's turn is opened the way the template opens it: with the reasoning opened, or with it
@@ -1165,7 +1192,21 @@ pub fn open(path: &str, ctx: usize, name: Option<String>) -> Box<dyn Serve> {
         mtp_d: 0,
         pl: crate::plan::planner(),
         timed: (0, 0.0, 0.0, 0, 0.0),
+        mm: None,
+        images: Vec::new(),
     };
+    // TORC_MMPROJ=<mmproj .gguf>: images in requests (vision.rs); the Qwen chat format only
+    if let Some(p) = crate::switches::get("TORC_MMPROJ").filter(|p| !p.is_empty()) {
+        match (chat() == Chat::Qwen, e.tok.find("<|image_pad|>"), vision::Mmproj::open(&p)) {
+            (true, Some(pad), Ok(mp)) if mp.out_dim() == e.m.h.d_model as usize => {
+                eprintln!("torc-server: vision on ({p}, at most {} rows an image)", vision::max_rows());
+                e.mm = Some((mp, pad));
+                vision::set_enabled(true);
+            }
+            (_, _, Ok(_)) => eprintln!("torc-server: TORC_MMPROJ ignored: this model has no matching image tokens"),
+            (_, _, Err(x)) => eprintln!("torc-server: TORC_MMPROJ ignored: {x}"),
+        }
+    }
     // MTP drafts are on by default for the qwen35moe and qwen3next blocks, and off for qwen4exp's (Flash Next)
     e.mtp_d = if e.m.mtp_std() { crate::switches::num("TORC_MTP").unwrap_or(8).min(16) } else { 0 };
     eprintln!(
