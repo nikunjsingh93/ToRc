@@ -169,7 +169,8 @@ Before making changes:
 
 1. Read [.ai/PROJECT.md](.ai/PROJECT.md) for the fork's architecture, decisions and pitfalls.
 2. Read [.ai/HANDOFF.md](.ai/HANDOFF.md) for recent work, open issues and the next steps. Topic notes such as
-   [.ai/VISION.md](.ai/VISION.md) hold research for a planned feature; read the one your task concerns.
+   [.ai/VISION.md](.ai/VISION.md) (the vision feature: verified facts, formulas, the plan it followed)
+   hold topic notes; read the one your task concerns.
 3. Check `git status`, `git log --oneline -10` and the branch (`custom` holds the fork's changes, `main` mirrors
    upstream), and inspect the relevant source files, to confirm the documented state is still accurate.
 4. Continue from the latest confirmed state instead of starting over.

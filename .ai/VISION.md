@@ -1,6 +1,7 @@
 # Native vision for Qwen3.6-35B-A3B in ToRc - research notes
 
-Status: implemented on branch `vision` (switch `TORC_MMPROJ`, off by default) and working end to end on the Q4_0 35B:
+Status: implemented and merged into `custom` (switch `TORC_MMPROJ`, off by default), working end to end on the Q4_0 35B.
+For the code map, the later speed work (encode 16.4 s to 4.7 s) and what is still open, see HANDOFF.md and PROJECT.md. Early result:
 the 800 x 300 test image below is read correctly (every text, colours, button), a second turn reuses the kept prompt
 (241 of 279 tokens cached) and text-only requests are unchanged. Not yet compared number-for-number against
 llama.cpp's image embeddings (plan step 1), only by answers. Code: `model/src/models/qwen/vision.rs` (tower, image

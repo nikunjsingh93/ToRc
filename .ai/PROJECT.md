@@ -16,7 +16,7 @@ This fork (https://github.com/nikunjsingh93/ToRc) exists to run ToRc as a local 
 - tool calls streamed while the model writes them (chat completions API, Qwen-format models);
 - the model unloaded after an idle time and loaded again on the next request (`TORC_IDLE_UNLOAD`);
 - a configurable reply limit for requests that send no `max_tokens` (`TORC_MAX_TOKENS`).
-- images in chat requests for Qwen3.6-35B-A3B (`TORC_MMPROJ`, branch `vision`; see VISION.md).
+- images in chat requests for Qwen3.6-35B-A3B (`TORC_MMPROJ`; see VISION.md).
 
 ## Technology Stack
 
@@ -26,7 +26,7 @@ This fork (https://github.com/nikunjsingh93/ToRc) exists to run ToRc as a local 
   ARM64 C++ component (`Microsoft.VisualStudio.Component.VC.Tools.ARM64`).
 - GPU tier: `wgpu` (Vulkan), behind the `torc-model/gpu` feature (the release zips are built with it).
 - NPU tier: loads a ggml build with the Hexagon backend at run time (from Qualcomm's GenieX CLI); not linked.
-- Key crates: serde_json (with `preserve_order`: tool-call argument objects keep the model's order), rayon, memmap2,
+- Key crates: image (png + jpeg only, for vision), serde_json (with `preserve_order`: tool-call argument objects keep the model's order), rayon, memmap2,
   blake3, wgpu.
 
 ## Project Structure
@@ -41,6 +41,7 @@ This fork (https://github.com/nikunjsingh93/ToRc) exists to run ToRc as a local 
 - `model/src/models/qwen/` - the engine most models run on: `serve.rs` (the generation loop, `run_seq`) and
   `chat.rs` (Qwen3.5/3.6 prompt format and tool-call reader `read`; this fork's `args_so_far` / `CallStream`).
 - `model/src/models/{gemma,gptoss,glm,lfm2,ernie,moonlight}` - other families.
+- `model/src/models/qwen/vision.rs` - this fork's vision tower, image ids and M-RoPE positions (see Architecture).
 - `kernels/src/switches.rs` - the only way to read `TORC_*` switches; `model/tests/switches.rs` fails if
   `SWITCHES.md` and the code disagree.
 
@@ -65,6 +66,17 @@ This fork (https://github.com/nikunjsingh93/ToRc) exists to run ToRc as a local 
   On Windows the child is assigned to a kill-on-job-close job object, so it dies with the supervisor however that ends.
 - Fork addition - `TORC_MAX_TOKENS`: `api::default_max()` replaces the fixed 4096 for requests without a limit, in
   all three APIs.
+- Fork addition - vision (`TORC_MMPROJ=<mmproj.gguf>`, `model/src/models/qwen/vision.rs`): the tower is the model's
+  `qwen3vl_merger` projector (27-block ViT, 2-D RoPE, 2 x 2 merger, outputs d_model-wide rows). An image part in a
+  request becomes the chat template's `<|vision_start|><|image_pad|><|vision_end|>` in the prompt text (only while the
+  tower is loaded: `content_text` checks `vision::enabled()`); `run_seq` expands the pad token into one id per row. Row
+  ids have the top bit set and carry a hash of the image plus the row number, so prompt reuse (which compares ids) tells
+  images apart; `std_embed` swaps such an id for its encoded row (registry of the last 32 images; `embed` encodes each
+  distinct image once). The language model's attention layers get interleaved M-RoPE positions through
+  `vision::rope_slot(slot)`: a slot map built by `set_positions(ids)` at the start of each request gives each slot a
+  (time, height, width) triple (text: all equal to slot + a running delta; image rows: grid; after an image the text
+  continues from base + max(rows, cols)); with no image in the sequence it is exactly the old `rope_row`. The MTP block
+  sees row ids as the pad token. Images cost about 1.2 s (small) to 3.9 s (558 rows) to encode, once per image.
 
 ## Development Commands
 
@@ -114,11 +126,9 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   bartowski's Qwen3.6-35B Q4_0 GGUF already contains it (`blk.40.nextn.*`).
 - Upstream torc-server's default reply limit is 4096 tokens including thinking; clients that send no `max_tokens`
   get cut off. Set `TORC_MAX_TOKENS`.
-- torc-server serves one conversation at a time. Vision (branch `vision`, `TORC_MMPROJ`) works for Qwen3.6-35B; image rows are ids with the top bit set (vision.rs), M-RoPE positions come from `vision::set_positions` and `rope_slot`; details in VISION.md. It was the
-  fork's last feature; the research notes with the verified facts are in [VISION.md](VISION.md). Key findings:
-  the model's mmproj (`qwen3vl_merger`, 27-block ViT, no DeepStack) outputs 2048-d rows; the language model needs
-  M-RoPE (`rope.dimension_sections = [11, 11, 10, 0]`) for image tokens while ToRc's RoPE is 1-D; prompt reuse
-  compares token ids, so images must become part of the sequence identity.
+- torc-server serves one conversation at a time.
+- Vision limits: data: URIs only (no http(s) image URLs), PNG and JPEG only, no two-machine pipeline, chats with images
+  are not saved to disk, the registry keeps the last 32 images (see HANDOFF.md, Known Issues).
 - Two copies of the 35B (about 22-26 GB each with the NPU) do not fit in 48 GB with Windows; run one ToRc server at a
   time and close the desktop app's model before starting a launcher.
 - PowerShell 5.1 pipes add a BOM when piping text to native commands such as `ssh`; write scripts to files instead.
@@ -136,7 +146,9 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
 - Launchers outside the repo (`%USERPROFILE%\Documents\Models\Start ToRc Qwen3.6-35B (fast).bat` on port 8081,
   `Start ToRc Qwen3.8-27B.bat` on port 8082) run `target\release\torc-server.exe` from this repo with
   `TORC_NPU=1`, `TORC_GPU_ATTN=1`, `TORC_WARM=wait`, `TORC_MAX_TOKENS=32768`, `TORC_IDLE_UNLOAD=600`. Rebuilding
-  updates what they run.
+  updates what they run. To turn vision on, add to the 35B launcher:
+  `set "TORC_MMPROJ=%USERPROFILE%\Documents\Models\Qwen3.6-35B\mmproj-Qwen3.6-35B-A3B-BF16.gguf"` (the mmproj is from
+  lmstudio-community/Qwen3.6-35B-A3B-GGUF).
 - Models are converted `.torc` files in the upstream release zip's `models` folder (Qwen_Qwen3.6-35B-A3B-Q4_0.torc,
   Qwen3.8-27B-Q4_0.torc). Auto-tune results live in `%LOCALAPPDATA%\torc\tune`.
 - Measured on this machine (8.4K-token coding prompt, server timings): 35B Q4_0 with NPU + GPU + MTP read about
