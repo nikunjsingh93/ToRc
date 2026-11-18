@@ -78,7 +78,7 @@ All on this machine (Snapdragon X2 Elite Extreme, Windows 11 ARM64, 48 GB):
 
 ## Next Steps
 
-1. **Native vision for Qwen3.6-35B: finish.** Done on `vision` (see VISION.md): tower, preprocessing, M-RoPE, reuse, three APIs. Still open: compare the image rows with llama.cpp numerically; the Anthropic and Responses image paths and a JPEG are untested; a large screenshot (576 rows) timing and quality check; NPU/GPU tiers were on in the test and worked; pipeline (two machines) is not supported with images; images are not saved in on-disk chat states; then merge `vision` into `custom`.
+1. **Native vision for Qwen3.6-35B: finish.** Done on `vision` (see VISION.md): tower, preprocessing, M-RoPE, reuse, three APIs. Tested since: a generated 1920x1080 code screenshot as PNG and JPEG (18 x 31 = 558 rows) was transcribed exactly; encoding took 11-12 s (the tower is the cost, the whole request 15-17 s). Still open: compare the image rows with llama.cpp numerically; speed up the tower if 11 s is too slow (lower TORC_VISION_TOKENS or optimise the gemm/attention); the Anthropic and Responses image paths are untested; NPU/GPU tiers were on in the test and worked; pipeline (two machines) is not supported with images; images are not saved in on-disk chat states; then merge `vision` into `custom`.
 2. Stream tool calls on the Anthropic messages and OpenAI Responses APIs too (MessagesStream / ResponsesStream need
    incremental tool-call events), and consider the GLM and LFM2 formats.
 3. Consider offering the changes upstream as separate PRs (one change per PR, per CONTRIBUTING.md), with the
