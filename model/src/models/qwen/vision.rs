@@ -331,32 +331,45 @@ impl Mmproj {
         let mut tmp = vec![0.0f32; n * d];
         let ffn = self.blocks[0].up.0.rows;
         let mut mid = vec![0.0f32; n * ffn];
+        let (mut t_lin, mut t_att, mut t_oth) = (0.0f64, 0.0f64, 0.0f64);
+        let mut tm = std::time::Instant::now();
+        let mut lap = |acc: &mut f64| {
+            let now = std::time::Instant::now();
+            *acc += (now - tm).as_secs_f64();
+            tm = now;
+        };
         for b in &self.blocks {
             layer_norm(&x, d, &b.ln1.0, &b.ln1.1, &mut xn);
+            lap(&mut t_oth);
             self.linear(&xn, n, &b.qkv, &mut qkv);
+            lap(&mut t_lin);
             attention(&qkv, n, nh, hd, &rope, &mut att);
+            lap(&mut t_att);
             self.linear(&att, n, &b.out, &mut tmp);
-            for (a, t) in x.iter_mut().zip(&tmp) {
-                *a += t;
-            }
+            lap(&mut t_lin);
+            add_into(&mut x, &tmp);
             layer_norm(&x, d, &b.ln2.0, &b.ln2.1, &mut xn);
+            lap(&mut t_oth);
             self.linear(&xn, n, &b.up, &mut mid);
-            for v in mid.iter_mut() {
-                *v = gelu(*v);
-            }
+            lap(&mut t_lin);
+            gelu_all(&mut mid);
+            lap(&mut t_oth);
             self.linear(&mid, n, &b.down, &mut tmp);
-            for (a, t) in x.iter_mut().zip(&tmp) {
-                *a += t;
-            }
+            lap(&mut t_lin);
+            add_into(&mut x, &tmp);
+            lap(&mut t_oth);
+        }
+        if crate::switches::on("TORC_VISION_PROF") {
+            let a = |i: usize| ATT_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+            eprintln!("vision: attention thread-seconds: scores {:.1}, softmax {:.1}, values {:.1}", a(0), a(1), a(2));
+            eprintln!("vision: {n} patches: products {t_lin:.2} s, attention {t_att:.2} s, other {t_oth:.2} s");
         }
         // the merger: a norm per patch, then four neighbours side by side (they are consecutive rows), two products
         layer_norm(&x, d, &self.post_ln.0, &self.post_ln.1, &mut xn);
         let (nm, md) = (n / (self.merge * self.merge), d * self.merge * self.merge);
         let mut h1 = vec![0.0f32; nm * md];
         self.linear(&xn, nm, &self.fc1, &mut h1);
-        for v in h1.iter_mut() {
-            *v = gelu(*v);
-        }
+        gelu_all(&mut h1);
         let mut out = vec![0.0f32; nm * self.out_dim];
         self.linear(&h1, nm, &self.fc2, &mut out);
         Ok(ImageRows { mh: gh / self.merge, mw: gw / self.merge, dim: self.out_dim, rows: out })
@@ -451,14 +464,30 @@ fn gelu(x: f32) -> f32 {
 }
 
 fn layer_norm(x: &[f32], d: usize, w: &[f32], b: &[f32], out: &mut [f32]) {
-    for (xr, or) in x.chunks_exact(d).zip(out.chunks_exact_mut(d)) {
-        let mean = xr.iter().map(|&v| v as f64).sum::<f64>() / d as f64;
-        let var = xr.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / d as f64;
-        let s = 1.0 / (var as f32 + LN_EPS).sqrt();
-        for i in 0..d {
-            or[i] = (xr[i] - mean as f32) * s * w[i] + b[i];
+    par_pieces(out, 16 * d, &|off, piece| {
+        for (xr, or) in x[off..off + piece.len()].chunks_exact(d).zip(piece.chunks_exact_mut(d)) {
+            let mean = xr.iter().map(|&v| v as f64).sum::<f64>() / d as f64;
+            let var = xr.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / d as f64;
+            let s = 1.0 / (var as f32 + LN_EPS).sqrt();
+            for i in 0..d {
+                or[i] = (xr[i] - mean as f32) * s * w[i] + b[i];
+            }
         }
-    }
+    });
+}
+
+/// a += b, across the pool.
+fn add_into(a: &mut [f32], b: &[f32]) {
+    par_pieces(a, 1 << 14, &|off, piece| {
+        for (x, y) in piece.iter_mut().zip(&b[off..]) {
+            *x += y;
+        }
+    });
+}
+
+/// GELU in place, across the pool.
+fn gelu_all(a: &mut [f32]) {
+    par_pieces(a, 1 << 14, &|_, piece| piece.iter_mut().for_each(|v| *v = gelu(*v)));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -478,10 +507,13 @@ fn linear_bf16(x: &[f32], n: usize, k: usize, w: &[u16], m: usize, bias: &[f32],
     });
 }
 
+/// Weight rows a task takes, and tokens: a task's working set (its rows as f32 and its tokens) stays in the L2 cache,
+/// and the tokens are read once per block of rows rather than once per few rows.
 const RB: usize = 16;
+const TB: usize = 1 << 20;
 
-/// The product in blocks of RB weight rows: a block's rows are made f32 (`fetch`), then each group of four tokens takes
-/// its dot products against four of them at a time. k must be a multiple of 4 and m of RB.
+/// The product in blocks of RB weight rows by TB tokens: a block's rows are made f32 (`fetch`), then four weight rows
+/// at a time take their dot products against each group of four tokens. k must be a multiple of 4 and m of 4.
 fn gemm(
     x: &[f32],
     n: usize,
@@ -491,44 +523,85 @@ fn gemm(
     out: &mut [f32],
     fetch: &(dyn Fn(usize, usize, &mut [f32]) + Sync),
 ) {
-    assert!(k % 4 == 0 && m % RB == 0 && x.len() == n * k && out.len() == n * m);
+    assert!(k % 4 == 0 && m % 4 == 0 && x.len() == n * k && out.len() == n * m);
     let op = crate::pool::SyncPtr::new(out);
-    crate::pool::par_for(m / RB, &|bk| {
-        let r0 = bk * RB;
-        let mut wf = vec![0.0f32; RB * k];
-        fetch(r0, r0 + RB, &mut wf);
-        let mut t = 0;
-        while t < n {
-            let xs: [&[f32]; 4] = std::array::from_fn(|i| {
-                let r = (t + i).min(n - 1);
-                &x[r * k..(r + 1) * k]
-            });
-            for rr in (0..RB).step_by(4) {
-                let ws: [&[f32]; 4] = std::array::from_fn(|i| &wf[(rr + i) * k..(rr + i + 1) * k]);
+    let (nr, nt) = (m.div_ceil(RB), n.div_ceil(TB));
+    crate::pool::par_for(nr * nt, &|task| {
+        let (rb, tb) = (task / nt, task % nt);
+        let (r0, r1) = (rb * RB, ((rb + 1) * RB).min(m));
+        let (t0, t1) = (tb * TB, ((tb + 1) * TB).min(n));
+        let mut wf = vec![0.0f32; (r1 - r0) * k];
+        fetch(r0, r1, &mut wf);
+        for rr in (0..r1 - r0).step_by(4) {
+            let ws: [&[f32]; 4] = std::array::from_fn(|i| &wf[(rr + i) * k..(rr + i + 1) * k]);
+            let mut t = t0;
+            while t < t1 {
+                // a last group short of four tokens repeats its final one, and only the real ones are written
+                let xs: [&[f32]; 4] = std::array::from_fn(|i| {
+                    let r = (t + i).min(n - 1);
+                    &x[r * k..(r + 1) * k]
+                });
                 let acc = tile(&xs, &ws);
                 for i in 0..4 {
-                    if t + i < n {
+                    if t + i < t1 {
                         for j in 0..4 {
-                            // SAFETY: this task alone writes the columns r0..r0 + RB of every row
+                            // SAFETY: this task alone writes these columns of these rows
                             unsafe { *op.at((t + i) * m + r0 + rr + j) = acc[i][j] + bias[r0 + rr + j] };
                         }
                     }
                 }
+                t += 4;
             }
-            t += 4;
         }
     });
 }
 
 /// Four tokens against four weight rows: the sixteen dot products, each as four lanes summed at the end.
 #[inline(always)]
+#[cfg(target_arch = "aarch64")]
 fn tile(xs: &[&[f32]; 4], ws: &[&[f32]; 4]) -> [[f32; 4]; 4] {
+    use std::arch::aarch64::*;
     let k = xs[0].len();
+    assert!(k % 4 == 0 && xs.iter().all(|c| c.len() == k) && ws.iter().all(|c| c.len() == k));
+    // SAFETY: every load is at an index below k, which is the length of each slice
+    unsafe {
+        let mut acc = [[vdupq_n_f32(0.0); 4]; 4];
+        let mut i = 0;
+        while i < k {
+            let x = [
+                vld1q_f32(xs[0].as_ptr().add(i)),
+                vld1q_f32(xs[1].as_ptr().add(i)),
+                vld1q_f32(xs[2].as_ptr().add(i)),
+                vld1q_f32(xs[3].as_ptr().add(i)),
+            ];
+            let w = [
+                vld1q_f32(ws[0].as_ptr().add(i)),
+                vld1q_f32(ws[1].as_ptr().add(i)),
+                vld1q_f32(ws[2].as_ptr().add(i)),
+                vld1q_f32(ws[3].as_ptr().add(i)),
+            ];
+            for t in 0..4 {
+                for r in 0..4 {
+                    acc[t][r] = vfmaq_f32(acc[t][r], x[t], w[r]);
+                }
+            }
+            i += 4;
+        }
+        std::array::from_fn(|t| std::array::from_fn(|r| vaddvq_f32(acc[t][r])))
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn tile(xs: &[&[f32]; 4], ws: &[&[f32]; 4]) -> [[f32; 4]; 4] {
+    let xc: [&[[f32; 4]]; 4] = std::array::from_fn(|t| xs[t].as_chunks::<4>().0);
+    let wc: [&[[f32; 4]]; 4] = std::array::from_fn(|r| ws[r].as_chunks::<4>().0);
+    let n4 = xc[0].len();
+    // equal lengths up front, so the indexing below needs no checks
+    assert!(xc.iter().all(|c| c.len() == n4) && wc.iter().all(|c| c.len() == n4));
     let mut acc = [[[0.0f32; 4]; 4]; 4];
-    let mut i = 0;
-    while i < k {
-        let xv: [[f32; 4]; 4] = std::array::from_fn(|t| std::array::from_fn(|l| xs[t][i + l]));
-        let wv: [[f32; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|l| ws[r][i + l]));
+    for i in 0..n4 {
+        let xv: [[f32; 4]; 4] = std::array::from_fn(|t| xc[t][i]);
+        let wv: [[f32; 4]; 4] = std::array::from_fn(|r| wc[r][i]);
         for t in 0..4 {
             for r in 0..4 {
                 for l in 0..4 {
@@ -536,7 +609,6 @@ fn tile(xs: &[&[f32]; 4], ws: &[&[f32]; 4]) -> [[f32; 4]; 4] {
                 }
             }
         }
-        i += 4;
     }
     std::array::from_fn(|t| std::array::from_fn(|r| (acc[t][r][0] + acc[t][r][1]) + (acc[t][r][2] + acc[t][r][3])))
 }
@@ -564,53 +636,90 @@ fn attention(qkv: &[f32], n: usize, nh: usize, hd: usize, rope: &[(Vec<f32>, Vec
                         t[i + half] = s[i + half] * cs[i] + s[i] * sn[i];
                     }
                 } else {
-                    t.copy_from_slice(s);
+                    // the values go transposed: [head][i][patch]
+                    for i in 0..hd {
+                        tgt[h * hd * n + i * n + p] = s[i];
+                    }
                 }
             }
         }
     }
     let scale = 1.0 / (hd as f32).sqrt();
     let op = crate::pool::SyncPtr::new(out);
+    // eight queries a task: their scores against every key (the four-by-four tile of the products), the softmax, then
+    // the weighted values. n is a multiple of 4 (whole 2 x 2 windows); the last block's missing queries repeat the
+    // final one and are not written
     const QB: usize = 8;
     let nq = n.div_ceil(QB);
     crate::pool::par_for(nh * nq, &|c| {
         let (h, qb) = (c / nq, c % nq);
-        let (kh, vh) = (&k[h * n * hd..(h + 1) * n * hd], &v[h * n * hd..(h + 1) * n * hd]);
-        let mut sc = vec![0.0f32; n];
-        let mut acc = vec![0.0f32; hd];
-        for qi in qb * QB..((qb + 1) * QB).min(n) {
-            let qv = &q[(h * n + qi) * hd..(h * n + qi + 1) * hd];
-            let mut mx = f32::NEG_INFINITY;
-            for j in 0..n {
-                let kr = &kh[j * hd..(j + 1) * hd];
-                let mut s = [0.0f32; 4];
-                for i in 0..hd / 4 {
+        let (qh, kh, vh) =
+            (&q[h * n * hd..(h + 1) * n * hd], &k[h * n * hd..(h + 1) * n * hd], &v[h * n * hd..(h + 1) * n * hd]);
+        let t0 = std::time::Instant::now();
+        let mut sc = vec![0.0f32; QB * n];
+        let qrow = |i: usize| {
+            let r = (qb * QB + i).min(n - 1);
+            &qh[r * hd..(r + 1) * hd]
+        };
+        for g in 0..QB / 4 {
+            let xs: [&[f32]; 4] = std::array::from_fn(|i| qrow(g * 4 + i));
+            for j in (0..n).step_by(4) {
+                let ws: [&[f32]; 4] = std::array::from_fn(|i| &kh[(j + i) * hd..(j + i + 1) * hd]);
+                let t = tile(&xs, &ws);
+                for i in 0..4 {
                     for l in 0..4 {
-                        s[l] = qv[i * 4 + l].mul_add(kr[i * 4 + l], s[l]);
+                        sc[(g * 4 + i) * n + j + l] = t[i][l] * scale;
                     }
                 }
-                let dot = ((s[0] + s[1]) + (s[2] + s[3])) * scale;
-                sc[j] = dot;
-                mx = mx.max(dot);
-            }
-            let mut sum = 0.0f32;
-            for s in sc.iter_mut() {
-                *s = (*s - mx).exp();
-                sum += *s;
-            }
-            acc.iter_mut().for_each(|a| *a = 0.0);
-            for j in 0..n {
-                let w = sc[j];
-                let vr = &vh[j * hd..(j + 1) * hd];
-                for i in 0..hd {
-                    acc[i] = w.mul_add(vr[i], acc[i]);
-                }
-            }
-            for i in 0..hd {
-                // SAFETY: this query's slice of this head is written by this task alone
-                unsafe { *op.at(qi * d + h * hd + i) = acc[i] / sum };
             }
         }
+        let t1 = std::time::Instant::now();
+        let mut sum = [0.0f32; QB];
+        for i in 0..QB {
+            let row = &mut sc[i * n..(i + 1) * n];
+            let mx = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let mut s = 0.0f32;
+            for x in row.iter_mut() {
+                *x = (*x - mx).exp();
+                s += *x;
+            }
+            sum[i] = s;
+        }
+        let t2 = std::time::Instant::now();
+        // the values, transposed per head (vt[head][i][key]): each output is a dot over the keys, the same tile
+        for g in 0..QB / 4 {
+            let xs: [&[f32]; 4] = std::array::from_fn(|i| &sc[(g * 4 + i) * n..(g * 4 + i + 1) * n]);
+            for i0 in (0..hd).step_by(4) {
+                let ws: [&[f32]; 4] = std::array::from_fn(|i| &vh[(i0 + i) * n..(i0 + i + 1) * n]);
+                let t = tile(&xs, &ws);
+                for qi in 0..4 {
+                    let r = qb * QB + g * 4 + qi;
+                    if r < n {
+                        for l in 0..4 {
+                            // SAFETY: this query's slice of this head is written by this task alone
+                            unsafe { *op.at(r * d + h * hd + i0 + l) = t[qi][l] / sum[g * 4 + qi] };
+                        }
+                    }
+                }
+            }
+        }
+        let t3 = std::time::Instant::now();
+        for (a, (x, y)) in [(0usize, (t0, t1)), (1, (t1, t2)), (2, (t2, t3))] {
+            ATT_NS[a].fetch_add((y - x).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+static ATT_NS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Runs f(offset, piece) over `out` cut into pieces of `unit` values (the last may be shorter), across the pool.
+fn par_pieces(out: &mut [f32], unit: usize, f: &(dyn Fn(usize, &mut [f32]) + Sync)) {
+    let len = out.len();
+    let p = crate::pool::SyncPtr::new(out);
+    crate::pool::par_for(len.div_ceil(unit), &|i| {
+        let (a, b) = (i * unit, ((i + 1) * unit).min(len));
+        // SAFETY: the pieces are disjoint
+        f(a, unsafe { p.slice(a, b - a) });
     });
 }
 
@@ -857,5 +966,44 @@ mod tests {
         let ids = [1, 99, 2, 99, 3];
         assert_eq!(expand(&ids, 99, &[vec![ROW_BIT], vec![ROW_BIT | 1, ROW_BIT | 2]]).unwrap().len(), 6);
         assert!(expand(&ids, 99, &[vec![ROW_BIT]]).is_err());
+    }
+}
+
+/// A timing and regression probe on the real tower: TORC_MMPROJ names the mmproj, TORC_TEST_IMAGE an image; with
+/// TORC_VISION_OUT the rows are written there as f32 (a later run compares against them). Run with
+/// `cargo test --release -p torc-model --lib vision_probe -- --ignored --nocapture`.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn vision_probe() {
+    let (Some(mp), Some(img)) = (crate::switches::get("TORC_MMPROJ"), crate::switches::get("TORC_TEST_IMAGE")) else {
+        return;
+    };
+    crate::pool::init(0);
+    let mp = Mmproj::open(&mp).unwrap();
+    let bytes = std::fs::read(img).unwrap();
+    let (p, gh, gw) = patches_of(&bytes, max_rows(), mp.patch).unwrap();
+    for run in 0..2 {
+        let t = std::time::Instant::now();
+        let r = mp.encode(&p, gh, gw).unwrap();
+        eprintln!("run {run}: {} x {} rows in {:.2} s", r.mh, r.mw, t.elapsed().as_secs_f64());
+        if run == 1 {
+            let bin: Vec<u8> = r.rows.iter().flat_map(|v| v.to_le_bytes()).collect();
+            if let Some(out) = crate::switches::get("TORC_VISION_OUT") {
+                if let Ok(old) = std::fs::read(&out) {
+                    let old: Vec<f32> =
+                        old.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+                    let (mut num, mut den) = (0.0f64, 0.0f64);
+                    for (a, b) in old.iter().zip(&r.rows) {
+                        num += ((a - b) as f64).powi(2);
+                        den += (*a as f64).powi(2);
+                    }
+                    eprintln!("relative difference from the saved rows: {:.3e}", (num / den).sqrt());
+                } else {
+                    std::fs::write(&out, bin).unwrap();
+                    eprintln!("saved the rows");
+                }
+            }
+        }
     }
 }
