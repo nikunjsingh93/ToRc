@@ -113,7 +113,11 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   bartowski's Qwen3.6-35B Q4_0 GGUF already contains it (`blk.40.nextn.*`).
 - Upstream torc-server's default reply limit is 4096 tokens including thinking; clients that send no `max_tokens`
   get cut off. Set `TORC_MAX_TOKENS`.
-- torc-server serves one conversation at a time and has no vision support yet.
+- torc-server serves one conversation at a time and has no vision support yet. Native vision for Qwen3.6-35B is the
+  next planned feature: verified facts, open questions and a step plan are in [VISION.md](VISION.md). Key findings:
+  the model's mmproj (`qwen3vl_merger`, 27-block ViT, no DeepStack) outputs 2048-d rows; the language model needs
+  M-RoPE (`rope.dimension_sections = [11, 11, 10, 0]`) for image tokens while ToRc's RoPE is 1-D; prompt reuse
+  compares token ids, so images must become part of the sequence identity.
 - Two copies of the 35B (about 22-26 GB each with the NPU) do not fit in 48 GB with Windows; run one ToRc server at a
   time and close the desktop app's model before starting a launcher.
 - PowerShell 5.1 pipes add a BOM when piping text to native commands such as `ssh`; write scripts to files instead.

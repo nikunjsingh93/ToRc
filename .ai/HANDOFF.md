@@ -9,8 +9,10 @@
 
 Branch `custom` (based on upstream v0.1.5, commit e93e4c0) builds on Windows ARM64 and runs the fork's three
 additions, all tested live with Qwen3.6-35B-A3B Q4_0 (NPU + GPU): streamed tool calls, idle unload, and
-`TORC_MAX_TOKENS`. The user's two ToRc launchers use this build. Nothing is pushed to GitHub yet (local commits only,
-at the time of writing). The desktop app is untouched.
+`TORC_MAX_TOKENS`. The user's two ToRc launchers use this build. `custom` is pushed to origin
+(github.com/nikunjsingh93/ToRc). The desktop app is untouched.
+
+Native vision for the 35B was researched but not started: see [VISION.md](VISION.md). No vision code exists yet.
 
 ## Recently Completed
 
@@ -25,6 +27,10 @@ at the time of writing). The desktop app is untouched.
 - `TORC_IDLE_UNLOAD` supervisor mode with a Windows kill-on-close job object for the child.
 - Streamed tool-call arguments for Qwen-format models on the chat completions API.
 - Agent docs: fork section at the end of `AGENTS.md`, `CLAUDE.md`, `.ai/PROJECT.md`, `.ai/HANDOFF.md`.
+- Pushed `custom` to origin.
+- Native-vision research, written to `.ai/VISION.md`: read the 35B's mmproj metadata and tensor layout and the
+  model's rope/token metadata with gguf-py (from `%TEMP%\lcpp\llama.cpp-b12119\gguf-py`), read llama.cpp's
+  `conversion/qwen3vl.py`, and located the ToRc code a vision path would touch. No code changed for it.
 
 ## Files Changed
 
@@ -71,7 +77,10 @@ All on this machine (Snapdragon X2 Elite Extreme, Windows 11 ARM64, 48 GB):
 
 ## Next Steps
 
-1. Decide with the user whether to push `custom` to the fork (`git push -u origin custom`); the fork is public.
+1. **Native vision for Qwen3.6-35B (the user's next goal).** Start with [VISION.md](VISION.md): first settle the items
+   in its section 2 ("Not yet verified") against llama.cpp's C++ sources or transformers, and get reference outputs
+   (its plan step 1), before writing the encoder. Work on a new branch off `custom` (e.g. `vision`), keep it off by
+   default, and keep text-only output bit-identical.
 2. Stream tool calls on the Anthropic messages and OpenAI Responses APIs too (MessagesStream / ResponsesStream need
    incremental tool-call events), and consider the GLM and LFM2 formats.
 3. Consider offering the changes upstream as separate PRs (one change per PR, per CONTRIBUTING.md), with the
