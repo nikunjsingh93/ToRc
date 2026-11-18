@@ -153,16 +153,37 @@ pub fn position(slot: usize) -> [i64; 3] {
     }
 }
 
+/// The M-RoPE sections of the language model (rope.dimension_sections: time, height, width, in rotation pairs).
+static SECTIONS: [std::sync::atomic::AtomicUsize; 3] = [
+    std::sync::atomic::AtomicUsize::new(11),
+    std::sync::atomic::AtomicUsize::new(11),
+    std::sync::atomic::AtomicUsize::new(10),
+];
+
+/// Sets the sections from the model's file (Qwen3.6-35B: 11, 11, 10).
+pub fn set_sections(s: [usize; 3]) {
+    for (a, v) in SECTIONS.iter().zip(s) {
+        a.store(v, Ordering::Relaxed);
+    }
+}
+
 /// The RoPE table for a slot: plain RoPE (rope_row) while no image is in the sequence, else the interleaved M-RoPE of
-/// Qwen3-VL: rotation pair s reads the height for s % 3 == 1, the width for s % 3 == 2 and the time for s % 3 == 0.
+/// Qwen3-VL: rotation pair s reads the height when s % 3 == 1 and s < 3 * sections[1], the width when s % 3 == 2 and
+/// s < 3 * sections[2], and otherwise the time.
 pub fn rope_slot(cs: &mut [f32], sn: &mut [f32], slot: u32, n_rot: u32, base: f32) {
     if !ACTIVE.load(Ordering::Relaxed) {
         return crate::ops::rope_row(cs, sn, slot, n_rot, base);
     }
     let p = position(slot as usize);
+    let sec =
+        [SECTIONS[0].load(Ordering::Relaxed), SECTIONS[1].load(Ordering::Relaxed), SECTIONS[2].load(Ordering::Relaxed)];
     for i in 0..(n_rot / 2) as usize {
-        let pos = p[i % 3] as f32;
-        let theta = pos * base.powf(-2.0 * i as f32 / n_rot as f32);
+        let axis = match i % 3 {
+            1 if i < 3 * sec[1] => 1,
+            2 if i < 3 * sec[2] => 2,
+            _ => 0,
+        };
+        let theta = p[axis] as f32 * base.powf(-2.0 * i as f32 / n_rot as f32);
         cs[i] = theta.cos();
         sn[i] = theta.sin();
     }
@@ -176,6 +197,8 @@ struct Mat {
     off: usize,
     rows: usize,
     cols: usize,
+    /// 30: BF16, 1: F16
+    ty: u32,
 }
 
 struct Block {
@@ -213,6 +236,10 @@ impl Mmproj {
     pub fn open(path: &str) -> Result<Mmproj> {
         let g = Gguf::open(path)?;
         let m = Meta::parse(&g.metadata)?;
+        // a DeepStack projector (extra rows fed into the early layers) is not read: its rows would be wrong
+        if g.tensors.iter().any(|t| t.name.starts_with("v.deepstack")) {
+            return err(format!("{path}: a DeepStack projector is not supported"));
+        }
         if m.str("clip.projector_type") != Some("qwen3vl_merger") {
             return err(format!("{path}: not a qwen3vl_merger projector"));
         }
@@ -243,10 +270,11 @@ impl Mmproj {
         };
         let mat = |name: &str, rows: usize, cols: usize| -> Result<Mat> {
             let t = t(name)?;
-            if t.ty != 30 || t.dims[0] as usize != cols || t.dims[1] as usize != rows || t.offset % 2 != 0 {
-                return err(format!("{path}: tensor {name}: expected a BF16 matrix of {rows} x {cols}"));
+            if !matches!(t.ty, 1 | 30) || t.dims[0] as usize != cols || t.dims[1] as usize != rows || t.offset % 2 != 0
+            {
+                return err(format!("{path}: tensor {name}: expected a BF16 or F16 matrix of {rows} x {cols}"));
             }
-            Ok(Mat { off: t.offset as usize, rows, cols })
+            Ok(Mat { off: t.offset as usize, rows, cols, ty: t.ty })
         };
         let pair = |a: &str, b: &str| -> Result<(Vec<f32>, Vec<f32>)> { Ok((f32s(a)?, f32s(b)?)) };
         let lin = |name: &str, rows: usize, cols: usize| -> Result<(Mat, Vec<f32>)> {
@@ -376,7 +404,7 @@ impl Mmproj {
     }
 
     fn linear(&self, x: &[f32], n: usize, w: &(Mat, Vec<f32>), out: &mut [f32]) {
-        linear_bf16(x, n, w.0.cols, self.w16(&w.0), w.0.rows, &w.1, out);
+        linear_16(x, n, w.0.cols, self.w16(&w.0), w.0.ty, w.0.rows, &w.1, out);
     }
 
     /// The position table interpolated (bilinear, corners aligned) to the patch grid, for each patch in merge order.
@@ -498,11 +526,11 @@ fn linear_f32(x: &[f32], n: usize, k: usize, w: &[f32], m: usize, bias: &[f32], 
     gemm(x, n, k, m, bias, out, &|r0, r1, buf: &mut [f32]| buf[..(r1 - r0) * k].copy_from_slice(&w[r0 * k..r1 * k]));
 }
 
-/// out (n x m) = x (n x k) * w^T + bias, with w as BF16 rows.
-fn linear_bf16(x: &[f32], n: usize, k: usize, w: &[u16], m: usize, bias: &[f32], out: &mut [f32]) {
+/// out (n x m) = x (n x k) * w^T + bias, with w as BF16 (ty 30) or F16 rows.
+fn linear_16(x: &[f32], n: usize, k: usize, w: &[u16], ty: u32, m: usize, bias: &[f32], out: &mut [f32]) {
     gemm(x, n, k, m, bias, out, &|r0, r1, buf: &mut [f32]| {
         for (d, s) in buf.iter_mut().zip(&w[r0 * k..r1 * k]) {
-            *d = bf16(*s);
+            *d = if ty == 30 { bf16(*s) } else { f16(*s) };
         }
     });
 }

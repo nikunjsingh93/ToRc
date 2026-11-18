@@ -1199,6 +1199,12 @@ pub fn open(path: &str, ctx: usize, name: Option<String>) -> Box<dyn Serve> {
     if let Some(p) = crate::switches::get("TORC_MMPROJ").filter(|p| !p.is_empty()) {
         match (chat() == Chat::Qwen, e.tok.find("<|image_pad|>"), vision::Mmproj::open(&p)) {
             (true, Some(pad), Ok(mp)) if mp.out_dim() == e.m.h.d_model as usize => {
+                // the model's M-RoPE sections (rotation pairs for time, height, width), when its file gives them
+                if let Some(s) = meta.as_ref().and_then(|mm| mm.ints(&mm.arch_key("rope.dimension_sections")))
+                    && s.len() >= 3
+                {
+                    vision::set_sections([s[0] as usize, s[1] as usize, s[2] as usize]);
+                }
                 eprintln!("torc-server: vision on ({p}, at most {} rows an image)", vision::max_rows());
                 e.mm = Some((mp, pad));
                 vision::set_enabled(true);

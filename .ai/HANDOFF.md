@@ -11,7 +11,7 @@ Branch `custom` (based on upstream v0.1.5, commit e93e4c0) builds on Windows ARM
 all tested live with Qwen3.6-35B-A3B Q4_0 (NPU + GPU): streamed tool calls, idle unload, `TORC_MAX_TOKENS`, and native
 image input (`TORC_MMPROJ`, merged from branch `vision`). `custom` and `vision` are pushed to origin
 (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers run this build; vision is off in them until
-`TORC_MMPROJ` is added to the 35B launcher (the line is in PROJECT.md, "Local Setup"). The desktop app is untouched.
+own F16 mmproj). The desktop app is untouched.
 
 ## Recently Completed
 
@@ -81,6 +81,7 @@ All on this machine (Snapdragon X2 Elite Extreme, Windows 11 ARM64, 48 GB):
 - `cargo fmt --all` - clean.
 - Streaming / idle unload: tested live earlier (see git history of this file: 552 argument pieces for a ~2 KB call;
   model unloaded after 45 s idle and reloaded in 11 s; the job object ended the child with the supervisor).
+- Vision on the 27B (Qwen3.8-27B Q4_0, its F16 mmproj; F16 matrices and the M-RoPE sections from the model file were added for it): the invoice image and the code screenshot were read correctly (request 20 s and 12 s incl. first-use warm-up).
 - Vision, live, 35B Q4_0 + NPU + GPU + MTP, port 8093, thinking off, greedy:
   - 800 x 300 PNG (invoice): all texts and colours read correctly; turn 2 reused 241 of 279 prompt tokens; text-only
     requests answered correctly afterwards (17 x 23 = 391).

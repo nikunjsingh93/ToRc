@@ -148,7 +148,8 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   `TORC_NPU=1`, `TORC_GPU_ATTN=1`, `TORC_WARM=wait`, `TORC_MAX_TOKENS=32768`, `TORC_IDLE_UNLOAD=600`. Rebuilding
   updates what they run. To turn vision on, add to the 35B launcher:
   `set "TORC_MMPROJ=%USERPROFILE%\Documents\Models\Qwen3.6-35B\mmproj-Qwen3.6-35B-A3B-BF16.gguf"` (the mmproj is from
-  lmstudio-community/Qwen3.6-35B-A3B-GGUF).
+  lmstudio-community/Qwen3.6-35B-A3B-GGUF). Both launchers now set `TORC_MMPROJ` (the 27B uses
+  `Qwen3.8-27Bmmproj-Qwen3.8-27B-F16.gguf`; remove the line to turn images off).
 - Models are converted `.torc` files in the upstream release zip's `models` folder (Qwen_Qwen3.6-35B-A3B-Q4_0.torc,
   Qwen3.8-27B-Q4_0.torc). Auto-tune results live in `%LOCALAPPDATA%\torc\tune`.
 - Measured on this machine (8.4K-token coding prompt, server timings): 35B Q4_0 with NPU + GPU + MTP read about
