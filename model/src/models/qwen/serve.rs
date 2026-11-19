@@ -1213,8 +1213,15 @@ pub fn open(path: &str, ctx: usize, name: Option<String>) -> Box<dyn Serve> {
             (_, _, Err(x)) => eprintln!("torc-server: TORC_MMPROJ ignored: {x}"),
         }
     }
-    // MTP drafts are on by default for the qwen35moe and qwen3next blocks, and off for qwen4exp's (Flash Next)
-    e.mtp_d = if e.m.mtp_std() { crate::switches::num("TORC_MTP").unwrap_or(8).min(16) } else { 0 };
+    // MTP drafts are on by default for the qwen35moe and qwen3next blocks. For qwen4exp's (Flash Next), which has them
+    // for two-machine speculation, one machine drafts only when TORC_MTP is set (with TORC_MTP_FILE naming the block)
+    e.mtp_d = if e.m.mtp_std() {
+        crate::switches::num("TORC_MTP").unwrap_or(8).min(16)
+    } else if e.m.mtp_hc_loaded() {
+        crate::switches::num("TORC_MTP").unwrap_or(0).min(16)
+    } else {
+        0
+    };
     eprintln!(
         "torc-server: MTP drafts {}",
         if e.mtp_d > 0 { format!("on (up to {} a pass, planned)", e.mtp_d) } else { "off".to_string() }

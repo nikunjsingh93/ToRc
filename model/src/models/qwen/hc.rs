@@ -303,7 +303,9 @@ impl Bf16 {
             }
             // Q8_0 (the MTP block's), and any other quantised type (ggml-org's IQ4_NL file keeps the mixers in IQ4_NL):
             // dequantised, then rounded to bf16
-            ty if ty != 0 && kops::block_size(ty).is_some() => {
+            // (block_size says None for Q5_0, which has its own weights path, but its dequantiser exists: the MTP file keeps
+            // some mixers in it)
+            ty if ty != 0 && (kops::block_size(ty).is_some() || ty == 6) => {
                 let rb = t.row_bytes();
                 let mut own = vec![0u16; d0 * d1];
                 let mut row = vec![0.0f32; d0];

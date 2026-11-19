@@ -491,6 +491,11 @@ impl Model {
         self.mtp.is_some()
     }
 
+    /// Whether qwen4exp's MTP block (TORC_MTP_FILE) is loaded.
+    pub fn mtp_hc_loaded(&self) -> bool {
+        self.mtp_hc.is_some()
+    }
+
     /// Runs only the MTP block's keys and values for the rows tokens[j] / hid[j] at pos0 + j (mtp::MtpBlock::fill).
     pub fn mtp_fill(&mut self, tokens: &[u32], hid: &[f32], pos0: u32) -> Result<()> {
         let Model { mtp, w, h, eng, .. } = self;

@@ -112,7 +112,7 @@ The switches are read once, when the program starts, so changing one means start
 
 | Switch | Kind | What it does |
 |---|---|---|
-| `TORC_MTP`, `TORC_MTP_FILE`, `TORC_MTP_HEAD`, `TORC_MTP_FILL_FULL` | setting: `TORC_MTP`, `TORC_MTP_FILE`; the rest development | the most MTP drafts a pass (default 8, at most 16, `0` off); a separate MTP block file; draft head; full-block fill |
+| `TORC_MTP`, `TORC_MTP_FILE`, `TORC_MTP_HEAD`, `TORC_MTP_FILL_FULL` | setting: `TORC_MTP`, `TORC_MTP_FILE`; the rest development | the most MTP drafts a pass (default 8, at most 16, `0` off; for Flash Next (qwen4exp) on one machine the default is off, and `TORC_MTP=3` with `TORC_MTP_FILE` turns it on: fork addition); a separate MTP block file (a converted `.torc`); draft head; full-block fill |
 | `TORC_DRAFT`, `TORC_DRAFT_N`, `TORC_DRAFT_P`, `TORC_DRAFT_HEAD`, `TORC_DRAFTS` | setting: `TORC_DRAFT`; the rest development | Gemma's drafter (the path to its assistant model); drafts per pass; fixed threshold; its head; a file for the planner's calibration (torc-run only) |
 | `TORC_HOST`, `TORC_API_KEY`, `TORC_IDLE_SAVE`, `TORC_IDLE_SAVE_MIN` | setting | server bind address; the key another machine's requests must carry, as `Authorization: Bearer` or `x-api-key` (this machine's never need it; set it whenever `TORC_HOST` opens the server to a network); seconds without a request before the current chat's state is saved (default 60, `0` never); the fewest prompt tokens a one-message chat needs to be saved then (default 8192) |
 | `TORC_MAX_TOKENS` | setting | the most tokens a reply takes when the request doesn't set `max_tokens` (default 4096, thinking included) |

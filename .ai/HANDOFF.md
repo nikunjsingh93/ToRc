@@ -49,6 +49,13 @@ to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B an
   comparison with llama.cpp's output on this model, MTP drafts (`mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf` in Draft Models,
   untested with ToRc), vision. The launcher is `Documents\Models\Start ToRc Qwen3.8-Flash-Next.bat` (port 8083, 32K
   context). The model needs 31 GiB resident plus 51 GiB of experts on a 48 GB machine, so it pages.
+- MTP on one machine (this fork): upstream only drafts for qwen4exp over two machines. `TORC_MTP=<n>` with
+  `TORC_MTP_FILE=<mtp .torc>` now turns drafting on for Flash Next on one machine (`serve.rs`, `Model::mtp_hc_loaded`);
+  the draft GGUF (`Draft Models\mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf`) is converted next to it as `.torc` and passes both
+  checks. `hc.rs` `Bf16::load` also accepts Q5_0 mixers (the MTP file has some). Measured, same Fibonacci prompt, greedy,
+  warm: 7.7 tokens/s without, 11.7 with `TORC_MTP=3`, 9.5 with 6 (more drafts cost more expert reads on this paging
+  model). The text matched the non-MTP run's start and length; a full bit comparison of the two outputs was not done.
+  The launcher sets both variables.
 - Found on the way: a `torc-server.exe` built without `--features torc-model/gpu` prints "TORC_GPU_ATTN is set, but this
   build has no GPU tier"; always build the workspace with the feature (the launchers set `TORC_GPU_ATTN`).
 
