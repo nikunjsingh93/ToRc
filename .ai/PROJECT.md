@@ -155,6 +155,7 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   `Documents\Models\Draft Models\mtp-Qwen3.8-Flash-Next-Q4_K_M.torc` (`TORC_MTP_FILE`, `TORC_MTP=3`). It needs the
   fork's IQ3_XXS, IQ2_S and Q2_0 kernels (Arm64 only). About 11.7 tokens/s writing with MTP, 7.7 without; long prompts
   are slow to read because every block of tokens pages the experts. Server timings are in HANDOFF.md.
+- Ornith 1.5 35B (`Start ToRc Ornith-1.5-35B.bat`, port 8084): qwen35moe like the Qwen3.6 35B, Q4_K_M converted to `Documents\Models\Ornith-1.5-35B\Ornith-1.5-35B-Q4_K_M.torc` (20 GiB, both checks pass), with its BF16 mmproj for images. Tested live: 391 correct, an invoice image read fully with the right colours; MTP drafts on by default; about 68 tokens/s writing text, 60 with an image, no long-prompt timing taken.
 - Models are converted `.torc` files in the upstream release zip's `models` folder (Qwen_Qwen3.6-35B-A3B-Q4_0.torc,
   Qwen3.8-27B-Q4_0.torc). Auto-tune results live in `%LOCALAPPDATA%\torc\tune`.
 - Measured on this machine (8.4K-token coding prompt, server timings): 35B Q4_0 with NPU + GPU + MTP read about
