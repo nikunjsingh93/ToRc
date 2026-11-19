@@ -10,7 +10,7 @@ Branch `custom` (based on upstream v0.1.5, commit e93e4c0) builds on Windows ARM
 all tested live with Qwen3.6-35B-A3B Q4_0 (NPU + GPU): streamed tool calls, idle unload, `TORC_MAX_TOKENS`, and native
 image input (`TORC_MMPROJ`, merged from branch `vision`; also tested on Qwen3.8-27B). `custom` and `vision` are pushed
 to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B and 27B) run this build with vision on
-(`TORC_MMPROJ` is set in both; the 27B uses its own F16 mmproj). The desktop app is untouched.
+(`TORC_MMPROJ` is set in both; the 27B uses its own F16 mmproj). The desktop app is untouched. Flash Next UD-IQ3_XXS runs too (three new Arm64 quant kernels and opt-in one-machine MTP, see the section below); it has its own launcher on port 8083.
 
 ## Recently Completed
 
@@ -32,7 +32,7 @@ to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B an
     attention scores/values, values stored transposed, elementwise ops on the pool). Through the server: 3.9 s for 558
     rows, 1.2 s for the 800 x 300 test image.
 
-## Flash Next UD-IQ3_XXS (this session, uncommitted)
+## Flash Next UD-IQ3_XXS (committed: de734a8 kernels, ed31dcc MTP)
 
 - The user's `Qwen3.8-Flash-Next\UD-IQ3_XXS` GGUF (82 GiB, 4 parts) converts and checks fine
   (`Qwen3.8-Flash-Next-UD-IQ3_XXS.torc` next to the folder), but the server panicked with "no kernel" for three of its
@@ -119,6 +119,7 @@ All on this machine (Snapdragon X2 Elite Extreme, Windows 11 ARM64, 48 GB):
 
 ## Next Steps
 
+0. Flash Next: x86 kernels for IQ3_XXS / IQ2_S / Q2_0 (only Arm64 NEON exists), compare its output with llama.cpp numerically, try `TORC_MTP` 2 and 4, and a full bit comparison of MTP and non-MTP output. Offer the kernels upstream as separate PRs.
 1. Compare the image rows with llama.cpp numerically (VISION.md plan step 1), and run `torc-golden` to prove text output
    is bit-identical.
 2. Test the Anthropic image block and Responses `input_image` paths; consider http(s) image URLs (needs a fetch, so
