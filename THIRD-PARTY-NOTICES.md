@@ -7,8 +7,10 @@ ToRc is licensed under either of the MIT licence (LICENSE-MIT) or the Apache Lic
 Copyright (c) 2023-2026 The ggml authors. MIT licence: https://github.com/ggml-org/ggml/blob/master/LICENSE and https://github.com/ggml-org/llama.cpp/blob/master/LICENSE
 
 - `kernels/src/quant/iq3s_grid.rs` - IQ3_S's grid (`iq3s_grid`, from ggml's `ggml-common.h`), copied as data, since it defines the format.
+- `kernels/src/quant/iq2s_grid.rs` - IQ2_S's grid (`iq2s_grid`, from ggml's `ggml-common.h`), copied as data, since it defines the format.
+- `kernels/src/quant/iq3xxs_grid.rs` - IQ3_XXS's grid and sign table (`iq3xxs_grid`, `ksigns_iq2xs`, from ggml's `ggml-common.h`), copied as data, since they define the format.
 - `model/src/chat/uniflags.rs` - the Unicode category ranges, generated from llama.cpp's `src/unicode-data.cpp` (itself generated from the Unicode Character Database).
-- The quantised block layouts, their reference dequantisation and dot-product orders (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, IQ3_S, Q8_K, MXFP4) and the GGUF file format are implemented from ggml's definitions, which the comments cite where they are used.
+- The quantised block layouts, their reference dequantisation and dot-product orders (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S, Q2_0, Q8_K, MXFP4) and the GGUF file format are implemented from ggml's definitions, which the comments cite where they are used.
 - `kernels/src/platform/npu/ggml.rs` - declarations of ggml's C API (function signatures and enum values from `ggml.h`), used to call a ggml build at run time.
 - `model/src/models/gemma/npu_gemma.rs` - Gemma 4's graph for the NPU follows llama.cpp's `src/models/gemma4.cpp` and its `build_moe_ffn`. `model/src/models/gemma/gemma_mtp.rs` - Gemma 4's draft model follows llama.cpp's `src/models/gemma4-assistant.cpp` and `common/speculative.cpp`.
 - `model/src/models/qwen/hc.rs` `to_bf16` rounds as ggml's `ggml_compute_fp32_to_bf16`. The eight-lane horizontal sums in `kernels/src/platform/cpu/x86.rs`, `x86dot.rs` and `model/src/layers/moe.rs` add the lanes in the order of ggml's `hsum_float_8`.

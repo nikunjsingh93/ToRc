@@ -2383,6 +2383,174 @@ unsafe fn iq3s_dotv<const NV: usize>(w: *const u8, x: *const BlockQ8K, nb: usize
     }
 }
 
+/// Rows of IQ3_XXS against nv vectors, a row a pass, with each block's levels and signs made once for up to 4 vectors.
+/// For each vector and block it forms the reference's exact sumi = the sum over the 8 groups of scale_g x (signed level
+/// . a), then acc = fma((d / 4) x d8, sumi, acc). The bits are the same (parity test).
+///
+/// # Safety
+/// FEAT_DotProd; y[v * y_stride + r] must be writable for v < nv and r < rows. (The sizes are asserted.)
+#[target_feature(enable = "dotprod")]
+pub unsafe fn iq3xxs_matmul(
+    w: &[u8],
+    row_bytes: usize,
+    rows: usize,
+    x: &[BlockQ8K],
+    nv: usize,
+    y: *mut f32,
+    y_stride: usize,
+) {
+    let nb = x.len() / nv.max(1);
+    assert!(nv >= 1 && x.len() == nv * nb && row_bytes >= nb * crate::IQ3_XXS_BLOCK && w.len() >= rows * row_bytes);
+    unsafe {
+        for r in 0..rows {
+            let wr = w.as_ptr().add(r * row_bytes);
+            let mut v0 = 0;
+            while v0 < nv {
+                let (xs, yr) = (x.as_ptr().add(v0 * nb), y.add(v0 * y_stride + r));
+                match nv - v0 {
+                    1 => iq3xxs_dotv::<1>(wr, xs, nb, yr, y_stride),
+                    2 => iq3xxs_dotv::<2>(wr, xs, nb, yr, y_stride),
+                    3 => iq3xxs_dotv::<3>(wr, xs, nb, yr, y_stride),
+                    _ => iq3xxs_dotv::<4>(wr, xs, nb, yr, y_stride),
+                }
+                v0 += 4;
+            }
+        }
+    }
+}
+
+/// iq3xxs_matmul' pass: one row (w) against NV vectors (x, nb blocks each) into y[v * y_stride].
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn iq3xxs_dotv<const NV: usize>(w: *const u8, x: *const BlockQ8K, nb: usize, y: *mut f32, y_stride: usize) {
+    unsafe {
+        // a sign byte spread over its 8 weights: byte l takes byte l / 8 and tests bit l % 8
+        const SPREAD: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        const BIT: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let (sp, bit) = (vld1q_u8(SPREAD.as_ptr()), vld1q_u8(BIT.as_ptr()));
+        let mut acc = [0f32; NV];
+        for b in 0..nb {
+            let blk = w.add(b * crate::IQ3_XXS_BLOCK);
+            let bs = core::slice::from_raw_parts(blk, crate::IQ3_XXS_BLOCK);
+            let sc: [i32; 8] = core::array::from_fn(|g| crate::iq3xxs_group_scale(bs, g));
+            let (sc0, sc1) = (vld1q_s32(sc.as_ptr()), vld1q_s32(sc.as_ptr().add(4)));
+            // the signed levels: (level ^ m) - m, with m all ones where the sign bit is set
+            let mut q = [vdupq_n_s8(0); 16];
+            for g in 0..8 {
+                let (l, s) = crate::iq3xxs_group(bs, g);
+                let sv = vreinterpretq_u8_u32(vdupq_n_u32(s));
+                for hh in 0..2 {
+                    let m = vtstq_u8(vqtbl1q_u8(sv, vaddq_u8(sp, vdupq_n_u8(2 * hh as u8))), bit);
+                    let lv = vld1q_u8(l.as_ptr().add(16 * hh));
+                    q[2 * g + hh] = vreinterpretq_s8_u8(vsubq_u8(veorq_u8(lv, m), m));
+                }
+            }
+            let fd = crate::f16_to_f32(core::ptr::read_unaligned(blk as *const u16)) * 0.25;
+            for v in 0..NV {
+                let xb = &*x.add(v * nb + b);
+                let p: [int32x4_t; 8] = core::array::from_fn(|g| {
+                    let a = xb.qs.as_ptr().add(32 * g);
+                    sdot(sdot(vdupq_n_s32(0), q[2 * g], vld1q_s8(a)), q[2 * g + 1], vld1q_s8(a.add(16)))
+                });
+                let red = |a: int32x4_t, b: int32x4_t, c: int32x4_t, d: int32x4_t| {
+                    vpaddq_s32(vpaddq_s32(a, b), vpaddq_s32(c, d))
+                };
+                let si = vmlaq_s32(vmulq_s32(red(p[0], p[1], p[2], p[3]), sc0), red(p[4], p[5], p[6], p[7]), sc1);
+                acc[v] = (fd * xb.d).mul_add(vaddvq_s32(si) as f32, acc[v]);
+            }
+        }
+        for v in 0..NV {
+            *y.add(v * y_stride) = acc[v];
+        }
+    }
+}
+
+/// Rows of IQ2_S against nv vectors, a row a pass, with each block's levels and signs made once for up to 4 vectors.
+/// For each vector and block it forms the reference's exact sumi = the sum over the 16 runs of 16 of scale_c x (signed
+/// level . a), then acc = fma((d / 8) x d8, sumi, acc). The bits are the same (parity test).
+///
+/// # Safety
+/// FEAT_DotProd; y[v * y_stride + r] must be writable for v < nv and r < rows. (The sizes are asserted.)
+#[target_feature(enable = "dotprod")]
+pub unsafe fn iq2s_matmul(
+    w: &[u8],
+    row_bytes: usize,
+    rows: usize,
+    x: &[BlockQ8K],
+    nv: usize,
+    y: *mut f32,
+    y_stride: usize,
+) {
+    let nb = x.len() / nv.max(1);
+    assert!(nv >= 1 && x.len() == nv * nb && row_bytes >= nb * crate::IQ2_S_BLOCK && w.len() >= rows * row_bytes);
+    unsafe {
+        for r in 0..rows {
+            let wr = w.as_ptr().add(r * row_bytes);
+            let mut v0 = 0;
+            while v0 < nv {
+                let (xs, yr) = (x.as_ptr().add(v0 * nb), y.add(v0 * y_stride + r));
+                match nv - v0 {
+                    1 => iq2s_dotv::<1>(wr, xs, nb, yr, y_stride),
+                    2 => iq2s_dotv::<2>(wr, xs, nb, yr, y_stride),
+                    3 => iq2s_dotv::<3>(wr, xs, nb, yr, y_stride),
+                    _ => iq2s_dotv::<4>(wr, xs, nb, yr, y_stride),
+                }
+                v0 += 4;
+            }
+        }
+    }
+}
+
+/// iq2s_matmul' pass: one row (w) against NV vectors (x, nb blocks each) into y[v * y_stride].
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn iq2s_dotv<const NV: usize>(w: *const u8, x: *const BlockQ8K, nb: usize, y: *mut f32, y_stride: usize) {
+    unsafe {
+        // two sign bytes spread over 16 weights: lanes 0..8 take byte 0 and lanes 8..16 byte 1, and lane l tests bit l % 8
+        const SPREAD: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        const BIT: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let (sp, bit) = (vld1q_u8(SPREAD.as_ptr()), vld1q_u8(BIT.as_ptr()));
+        let mut acc = [0f32; NV];
+        for b in 0..nb {
+            let blk = w.add(b * crate::IQ2_S_BLOCK);
+            let bs = core::slice::from_raw_parts(blk, crate::IQ2_S_BLOCK);
+            let sc: [i32; 16] = core::array::from_fn(|c| crate::iq2s_chunk_scale(bs, c));
+            let scv: [int32x4_t; 4] = core::array::from_fn(|k| vld1q_s32(sc.as_ptr().add(4 * k)));
+            // the signed levels of run c: (level ^ m) - m, with m all ones where the sign bit is set
+            let mut q = [vdupq_n_s8(0); 16];
+            for (c, qc) in q.iter_mut().enumerate() {
+                let (l0, s0) = crate::iq2s_group(bs, 2 * c);
+                let (l1, s1) = crate::iq2s_group(bs, 2 * c + 1);
+                let mut lv = [0u8; 16];
+                lv[..8].copy_from_slice(&l0);
+                lv[8..].copy_from_slice(&l1);
+                let mut sb = [0u8; 16];
+                sb[0] = s0;
+                sb[1] = s1;
+                let m = vtstq_u8(vqtbl1q_u8(vld1q_u8(sb.as_ptr()), sp), bit);
+                *qc = vreinterpretq_s8_u8(vsubq_u8(veorq_u8(vld1q_u8(lv.as_ptr()), m), m));
+            }
+            let fd = crate::f16_to_f32(core::ptr::read_unaligned(blk as *const u16)) * 0.125;
+            for v in 0..NV {
+                let xb = &*x.add(v * nb + b);
+                let p: [int32x4_t; 16] =
+                    core::array::from_fn(|c| sdot(vdupq_n_s32(0), q[c], vld1q_s8(xb.qs.as_ptr().add(16 * c))));
+                let red = |a: int32x4_t, b: int32x4_t, c: int32x4_t, d: int32x4_t| {
+                    vpaddq_s32(vpaddq_s32(a, b), vpaddq_s32(c, d))
+                };
+                let mut si = vmulq_s32(red(p[0], p[1], p[2], p[3]), scv[0]);
+                for k in 1..4 {
+                    si = vmlaq_s32(si, red(p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]), scv[k]);
+                }
+                acc[v] = (fd * xb.d).mul_add(vaddvq_s32(si) as f32, acc[v]);
+            }
+        }
+        for v in 0..NV {
+            *y.add(v * y_stride) = acc[v];
+        }
+    }
+}
+
 /// Rows of Q6_K against nv vectors (x is nv x nb blocks, and vector v's outputs go to y[v * y_stride + r]), a row a
 /// pass, each block unpacked once for up to 8 vectors. Each vector follows q6k_dot_rows' steps (an exact integer sum
 /// per block, then acc = fma(d_w * d_x, float(sum), acc)), so the bits are the same (parity test).
@@ -2506,6 +2674,100 @@ unsafe fn iq4nl_dotv<const NV: usize>(w: *const u8, x: *const Groups32, nb: usiz
                         *sj = sdot(t, q[j][1], vld1q_s8(p.add(16)));
                     }
                     let sum = vpaddq_s32(vpaddq_s32(s[0], s[1]), vpaddq_s32(s[2], s[3]));
+                    let dx = vld1q_f32(xb.d.as_ptr().add(4 * hf));
+                    acc[v][hf] = vfmaq_f32(acc[v][hf], vmulq_f32(dw[hf], dx), vcvtq_f32_s32(sum));
+                }
+            }
+        }
+        for v in 0..NV {
+            *y.add(v * y_stride) = hsum4x2(acc[v][0], acc[v][1]);
+        }
+    }
+}
+
+/// Rows of Q2_0 against nv vectors (as iq4nl_matmul): each row's 2-bit fields are unpacked once per 64 weights for up
+/// to 4 vectors, and each vector's products are summed per 32 weights in integers, then scaled by the weights' fp16 d
+/// times the activations' group scale. Every vector of a row follows the same steps, so the bits do not depend on how
+/// many vectors are in the call.
+///
+/// # Safety
+/// FEAT_DotProd; y[v * y_stride + r] must be writable for v < nv and r < rows. (The sizes are asserted.)
+#[target_feature(enable = "dotprod")]
+pub unsafe fn q2_0_matmul(
+    w: &[u8],
+    row_bytes: usize,
+    rows: usize,
+    x: &[Groups32],
+    nv: usize,
+    y: *mut f32,
+    y_stride: usize,
+) {
+    let nb = x.len() / nv.max(1);
+    assert!(nv >= 1 && x.len() == nv * nb && row_bytes >= nb * 4 * crate::Q2_0_BLOCK && w.len() >= rows * row_bytes);
+    unsafe {
+        for r in 0..rows {
+            let wr = w.as_ptr().add(r * row_bytes);
+            let mut v0 = 0;
+            while v0 < nv {
+                let (xs, yr) = (x.as_ptr().add(v0 * nb), y.add(v0 * y_stride + r));
+                match nv - v0 {
+                    1 => q2_0_dotv::<1>(wr, xs, nb, yr, y_stride),
+                    2 => q2_0_dotv::<2>(wr, xs, nb, yr, y_stride),
+                    3 => q2_0_dotv::<3>(wr, xs, nb, yr, y_stride),
+                    _ => q2_0_dotv::<4>(wr, xs, nb, yr, y_stride),
+                }
+                v0 += 4;
+            }
+        }
+    }
+}
+
+/// q2_0_matmul' pass: one row (w) against NV vectors (x, nb blocks of 256 each) into y[v * y_stride].
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn q2_0_dotv<const NV: usize>(w: *const u8, x: *const Groups32, nb: usize, y: *mut f32, y_stride: usize) {
+    unsafe {
+        let (m3, one) = (vdupq_n_u8(3), vdupq_n_s8(1));
+        let mut acc = [[vdupq_n_f32(0.0); 2]; NV];
+        for b in 0..nb {
+            let wb = w.add(b * 4 * crate::Q2_0_BLOCK);
+            let ds: [f32; 4] = core::array::from_fn(|j| {
+                crate::f16_to_f32(core::ptr::read_unaligned(wb.add(j * crate::Q2_0_BLOCK) as *const u16))
+            });
+            let dw =
+                [vld1q_f32([ds[0], ds[0], ds[1], ds[1]].as_ptr()), vld1q_f32([ds[2], ds[2], ds[3], ds[3]].as_ptr())];
+            // the levels (field - 1) of the 4 blocks, in weight order: q[j][h] holds weights 16 h .. 16 h + 15 of block j
+            let mut q = [[vdupq_n_s8(0); 4]; 4];
+            for (j, qj) in q.iter_mut().enumerate() {
+                let by = vld1q_u8(wb.add(j * crate::Q2_0_BLOCK + 2));
+                // field k of byte i is weight 4 i + k: t[k] lane i. Zipping (0, 2) with (1, 3), twice, restores the order
+                let t = [
+                    vandq_u8(by, m3),
+                    vandq_u8(vshrq_n_u8::<2>(by), m3),
+                    vandq_u8(vshrq_n_u8::<4>(by), m3),
+                    vshrq_n_u8::<6>(by),
+                ];
+                let (a0, b0) = (vzip1q_u8(t[0], t[2]), vzip1q_u8(t[1], t[3]));
+                let (a1, b1) = (vzip2q_u8(t[0], t[2]), vzip2q_u8(t[1], t[3]));
+                let o = [vzip1q_u8(a0, b0), vzip2q_u8(a0, b0), vzip1q_u8(a1, b1), vzip2q_u8(a1, b1)];
+                for h in 0..4 {
+                    qj[h] = vsubq_s8(vreinterpretq_s8_u8(o[h]), one);
+                }
+            }
+            for v in 0..NV {
+                let xb = &*x.add(v * nb + b);
+                // the 8 groups of 32 are the two halves of each of the 4 blocks
+                let mut s = [vdupq_n_s32(0); 8];
+                for (g, sg) in s.iter_mut().enumerate() {
+                    let p = xb.qs.as_ptr().add(32 * g);
+                    let t = sdot(vdupq_n_s32(0), q[g / 2][2 * (g % 2)], vld1q_s8(p));
+                    *sg = sdot(t, q[g / 2][2 * (g % 2) + 1], vld1q_s8(p.add(16)));
+                }
+                let red = |a: int32x4_t, b: int32x4_t, c: int32x4_t, d: int32x4_t| {
+                    vpaddq_s32(vpaddq_s32(a, b), vpaddq_s32(c, d))
+                };
+                for hf in 0..2 {
+                    let sum = red(s[4 * hf], s[4 * hf + 1], s[4 * hf + 2], s[4 * hf + 3]);
                     let dx = vld1q_f32(xb.d.as_ptr().add(4 * hf));
                     acc[v][hf] = vfmaq_f32(acc[v][hf], vmulq_f32(dw[hf], dx), vcvtq_f32_s32(sum));
                 }

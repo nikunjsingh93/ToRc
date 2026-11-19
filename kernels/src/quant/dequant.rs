@@ -38,6 +38,9 @@ pub fn block_geometry(ty: u32) -> Option<(usize, usize)> {
         11 => (110, 256),
         23 => (136, 256),
         21 => (110, 256),
+        22 => (82, 256),
+        18 => (98, 256),
+        42 => (18, 64),
         20 => (18, 32),
         39 => (17, 32),
         _ => return None,
@@ -143,6 +146,40 @@ pub fn dequantize(ty: u32, w: &[u8], y: &mut [f32]) -> bool {
                     for e in 0..32 {
                         let v = l[e] as i32;
                         y[32 * g + e] = db * (if (s >> e) & 1 == 1 { -v } else { v }) as f32;
+                    }
+                }
+            }
+            42 => {
+                // d x (q - 1) for each 2-bit field q, four fields a byte, lowest first
+                let d = h(b, 0);
+                for (j, yj) in y.iter_mut().enumerate().take(64) {
+                    let q = (b[2 + j / 4] >> (2 * (j % 4))) & 3;
+                    *yj = (q as i32 - 1) as f32 * d;
+                }
+            }
+            18 => {
+                // (d x (2s + 1) / 4 for the group) x the signed level
+                let d = h(b, 0);
+                for g in 0..8 {
+                    let db = d * crate::iq3xxs_group_scale(b, g) as f32 * 0.25;
+                    let (l, s) = crate::iq3xxs_group(b, g);
+                    for e in 0..32 {
+                        let v = l[e] as i32;
+                        y[32 * g + e] = db * (if (s >> e) & 1 == 1 { -v } else { v }) as f32;
+                    }
+                }
+            }
+            22 => {
+                // (d x (2s + 1) / 8) x the signed level, for each run of 16
+                let d = h(b, 0);
+                for c in 0..16 {
+                    let db = d * crate::iq2s_chunk_scale(b, c) as f32 * 0.125;
+                    for i in 2 * c..2 * c + 2 {
+                        let (l, s) = crate::iq2s_group(b, i);
+                        for e in 0..8 {
+                            let v = l[e] as i32;
+                            y[8 * i + e] = db * (if (s >> e) & 1 == 1 { -v } else { v }) as f32;
+                        }
                     }
                 }
             }

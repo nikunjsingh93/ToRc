@@ -173,6 +173,18 @@ pub fn dot_rows(ty: u32, w: &[u8], rb: usize, x: Q8s, y: &mut [f32]) {
             // IQ3_S SAFETY: as above
             return unsafe { kernels::neon::iq3s_matmul(w, rb, y.len(), x.k, 1, y.as_mut_ptr(), y.len()) };
         }
+        if ty == 18 && *KQ {
+            // IQ3_XXS SAFETY: as above
+            return unsafe { kernels::neon::iq3xxs_matmul(w, rb, y.len(), x.k, 1, y.as_mut_ptr(), y.len()) };
+        }
+        if ty == 22 && *KQ {
+            // IQ2_S SAFETY: as above
+            return unsafe { kernels::neon::iq2s_matmul(w, rb, y.len(), x.k, 1, y.as_mut_ptr(), y.len()) };
+        }
+        if ty == 42 && *KQ {
+            // Q2_0 SAFETY: as above
+            return unsafe { kernels::neon::q2_0_matmul(w, rb, y.len(), x.g, 1, y.as_mut_ptr(), y.len()) };
+        }
     }
     // x86-64 Q4_0: kernels::x86dot::q4_0_rows (the same bits)
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c"))]
@@ -710,7 +722,7 @@ unsafe fn dot_multi_rows(
         if matches!(ty, 12 | 13 | 14) && unsafe { klay_matmul(ty, wr, rows, x, nv, y, y_stride) } {
             return;
         }
-        if *MODE == 1 && matches!(ty, 3 | 6 | 7 | 8 | 11 | 12 | 13 | 14 | 20 | 21 | 23) {
+        if *MODE == 1 && matches!(ty, 3 | 6 | 7 | 8 | 11 | 12 | 13 | 14 | 18 | 20 | 21 | 22 | 23 | 42) {
             // SAFETY: FEAT_DotProd was checked; the kernels assert the sizes; y is as this function's contract says
             unsafe {
                 match ty {
@@ -723,6 +735,9 @@ unsafe fn dot_multi_rows(
                     11 => kernels::neon::q3k_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
                     23 => kernels::neon::iq4xs_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
                     21 => kernels::neon::iq3s_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                    18 => kernels::neon::iq3xxs_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                    22 => kernels::neon::iq2s_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                    42 => kernels::neon::q2_0_matmul(wr, row_bytes, rows, x.g, nv, y, y_stride),
                     _ => kernels::neon::iq4nl_matmul(wr, row_bytes, rows, x.g, nv, y, y_stride),
                 }
             }
@@ -819,6 +834,9 @@ unsafe fn native_multi(
                 11 => kernels::neon::q3k_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
                 23 => kernels::neon::iq4xs_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
                 21 => kernels::neon::iq3s_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                18 => kernels::neon::iq3xxs_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                22 => kernels::neon::iq2s_matmul(wr, row_bytes, rows, x.k, nv, y, y_stride),
+                42 => kernels::neon::q2_0_matmul(wr, row_bytes, rows, x.g, nv, y, y_stride),
                 20 => kernels::neon::iq4nl_matmul(wr, row_bytes, rows, x.g, nv, y, y_stride),
                 39 => kernels::neon::mxfp4_matmul(wr, row_bytes, rows, x.g, nv, y, y_stride),
                 _ => return false,

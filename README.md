@@ -79,7 +79,7 @@ on your hardware.
 | Gemma 4 26B-A4B | `gemma4` | its own template's format |
 | gpt-oss | `gpt-oss` | its own template's format |
 
-Quant types: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL, IQ4_XS, IQ3_S, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4.
+Quant types: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL, IQ4_XS, IQ3_S, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4, and on Arm64 (this fork) IQ3_XXS, IQ2_S, Q2_0.
 
 Any GGUF of a supported architecture should work, including fine-tunes and abliterated versions, as long as its quant
 types are in the list. The app checks the architecture before converting; check the quant types yourself for now (the

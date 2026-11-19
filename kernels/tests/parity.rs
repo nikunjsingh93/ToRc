@@ -54,7 +54,7 @@ fn quantized(rng: &mut Rng, nv: usize, nb: usize) -> Q8 {
 }
 
 /// (ggml type, block bytes, numbers a block, offsets of its fp16 fields): the types the row kernels take.
-const TYPES: [(u32, usize, usize, &[usize]); 13] = [
+const TYPES: &[(u32, usize, usize, &[usize])] = &[
     (2, 18, 32, &[0]),       // Q4_0
     (3, 20, 32, &[0, 2]),    // Q4_1
     (6, 22, 32, &[0]),       // Q5_0
@@ -64,9 +64,15 @@ const TYPES: [(u32, usize, usize, &[usize]); 13] = [
     (12, 144, 256, &[0, 2]), // Q4_K
     (13, 176, 256, &[0, 2]), // Q5_K
     (14, 210, 256, &[208]),  // Q6_K
+    #[cfg(target_arch = "aarch64")]
+    (18, 98, 256, &[0]), // IQ3_XXS (NEON only so far)
     (20, 18, 32, &[0]),      // IQ4_NL
     (21, 110, 256, &[0]),    // IQ3_S
+    #[cfg(target_arch = "aarch64")]
+    (22, 82, 256, &[0]), // IQ2_S (NEON only so far)
     (23, 136, 256, &[0]),    // IQ4_XS
+    #[cfg(target_arch = "aarch64")]
+    (42, 18, 64, &[0]), // Q2_0 (NEON only so far)
     (39, 17, 32, &[]),       // MXFP4 (its scale is one E8M0 byte, set in weights)
 ];
 
@@ -157,6 +163,9 @@ fn matmul(ty: u32, w: &[u8], rb: usize, rows: usize, xq: Q8s, nv: usize) -> Vec<
             20 => neon::iq4nl_matmul(w, rb, rows, xq.g, nv, p, rows),
             39 => neon::mxfp4_matmul(w, rb, rows, xq.g, nv, p, rows),
             21 => neon::iq3s_matmul(w, rb, rows, xq.k, nv, p, rows),
+            18 => neon::iq3xxs_matmul(w, rb, rows, xq.k, nv, p, rows),
+            22 => neon::iq2s_matmul(w, rb, rows, xq.k, nv, p, rows),
+            42 => neon::q2_0_matmul(w, rb, rows, xq.g, nv, p, rows),
             23 => neon::iq4xs_matmul(w, rb, rows, xq.k, nv, p, rows),
             _ => unreachable!(),
         }
@@ -199,7 +208,7 @@ fn multi_vector_consistent_and_correct() {
         return;
     }
     let mut rng = Rng(0x9e3779b97f4a7c15);
-    for &(ty, ..) in &TYPES {
+    for &(ty, ..) in TYPES {
         for (nb, rows) in [(1usize, 7usize), (3, 64), (8, 33)] {
             let (w, rb) = weights(&mut rng, ty, rows, nb);
             for nv in [1usize, 2, 3, 4, 5, 8, 9] {
@@ -1207,5 +1216,106 @@ fn bench_q45k_x86() {
             );
         }
         println!("{line}  (GMAC/s)");
+    }
+}
+
+/// IQ2_S's reference dequantiser against a line-by-line copy of ggml's dequantize_row_iq2_s (ggml-quants.c), which
+/// walks the block with moving qs / signs pointers instead of the indexed helpers the kernels share.
+#[test]
+fn iq2s_dequant_matches_ggml_loop() {
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    let (w, rb) = weights(&mut rng, 22, 5, 3);
+    for r in 0..5 {
+        let row = &w[r * rb..(r + 1) * rb];
+        let mut got = vec![0f32; 3 * QK];
+        assert!(kernels::dequant::dequantize(22, row, &mut got));
+        let mut want = Vec::new();
+        for blk in row.chunks_exact(82) {
+            let d = kernels::f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+            let (mut qs, mut signs) = (2usize, 2 + 32);
+            let qh = 66;
+            for ib32 in 0..8 {
+                let sc = blk[74 + ib32];
+                let db = [d * (0.5 + (sc & 15) as f32) * 0.25, d * (0.5 + (sc >> 4) as f32) * 0.25];
+                for l in 0..4 {
+                    let dl = db[l / 2];
+                    let idx = blk[qs + l] as usize | (((blk[qh + ib32] as usize) << (8 - 2 * l)) & 0x300);
+                    let grid = kernels::iq2s_grid::IQ2S_GRID[idx].to_le_bytes();
+                    for j in 0..8 {
+                        want.push(dl * grid[j] as f32 * if blk[signs + l] & (1 << j) != 0 { -1.0 } else { 1.0 });
+                    }
+                }
+                qs += 4;
+                signs += 4;
+            }
+        }
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "row {r} weight {i}: {g} vs {w}");
+        }
+    }
+}
+
+/// Q2_0's reference dequantiser against ggml's dequantize_row_q2_0 as written there (levels 00=-1, 01=0, 10=+1, 11=+2).
+#[test]
+fn q2_0_dequant_matches_ggml_loop() {
+    let mut rng = Rng(0x0fed_cba9_8765_4321);
+    let (w, rb) = weights(&mut rng, 42, 5, 3);
+    for r in 0..5 {
+        let row = &w[r * rb..(r + 1) * rb];
+        let mut got = vec![0f32; 3 * QK];
+        assert!(kernels::dequant::dequantize(42, row, &mut got));
+        let mut want = Vec::new();
+        for blk in row.chunks_exact(18) {
+            let d = kernels::f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+            for j in 0..64 {
+                let q = (blk[2 + j / 4] >> ((j % 4) * 2)) & 0x03;
+                want.push((q as i32 - 1) as f32 * d);
+            }
+        }
+        assert_eq!(
+            got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// IQ3_XXS's reference dequantiser against ggml's dequantize_row_iq3_xxs as written there (moving qs pointer, the u32 of
+/// signs and scale read with memcpy, the sign table indexed per run of 8).
+#[test]
+fn iq3xxs_dequant_matches_ggml_loop() {
+    let mut rng = Rng(0x7777_1234_5678_9abc);
+    let (w, rb) = weights(&mut rng, 18, 5, 3);
+    for r in 0..5 {
+        let row = &w[r * rb..(r + 1) * rb];
+        let mut got = vec![0f32; 3 * QK];
+        assert!(kernels::dequant::dequantize(18, row, &mut got));
+        let mut want = Vec::new();
+        for blk in row.chunks_exact(98) {
+            let d = kernels::f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+            let mut qs = 2usize;
+            let sas = 2 + 64;
+            for ib32 in 0..8 {
+                let aux = u32::from_le_bytes(blk[sas + 4 * ib32..sas + 4 * ib32 + 4].try_into().unwrap());
+                let db = d * (0.5 + (aux >> 28) as f32) * 0.5;
+                for l in 0..4 {
+                    let signs = kernels::iq3xxs_grid::KSIGNS_IQ2XS[((aux >> (7 * l)) & 127) as usize];
+                    let g1 = kernels::iq3xxs_grid::IQ3XXS_GRID[blk[qs + 2 * l] as usize].to_le_bytes();
+                    let g2 = kernels::iq3xxs_grid::IQ3XXS_GRID[blk[qs + 2 * l + 1] as usize].to_le_bytes();
+                    let sg = |j: usize| if signs & (1 << j) != 0 { -1.0f32 } else { 1.0 };
+                    let mut y = [0f32; 8];
+                    for j in 0..4 {
+                        y[j] = db * g1[j] as f32 * sg(j);
+                        y[j + 4] = db * g2[j] as f32 * sg(j + 4);
+                    }
+                    want.extend_from_slice(&y);
+                }
+                qs += 8;
+            }
+        }
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "row {r} weight {i}: {g} vs {w}");
+        }
     }
 }

@@ -53,7 +53,7 @@ licences; ToRc ships no weights.
 Supported: Qwen3.6-35B-A3B, Qwen3-30B-A3B, Qwen3.8 Flash Next, Qwen3-Next 80B, Qwen3.5 122B, the dense Qwen3.5 models,
 ERNIE-4.5-21B-A3B, GLM-4.7-Flash, Moonlight, LFM2.5-8B, Gemma 4 26B-A4B and gpt-oss, all served by `torc-server` (it
 reads the model's architecture from the file). Quant types: Q4_0, Q4_1, Q5_1, Q8_0, IQ4_NL, IQ4_XS, IQ3_S, Q3_K, Q4_K,
-Q5_K, Q6_K, MXFP4.
+Q5_K, Q6_K, MXFP4; this fork adds IQ3_XXS, IQ2_S and Q2_0 (Arm64 NEON only: `kernels/src/platform/cpu/neon.rs`, parity tests in `kernels/tests/parity.rs`; no x86 kernel yet).
 
 ## 4. Serve it
 

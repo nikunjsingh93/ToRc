@@ -36,14 +36,17 @@ pub use platform::cpu::{x86, x86_gemm};
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c"))]
 pub use platform::cpu::{x86dot, x86mm};
 pub use quant::f16::*;
+pub use quant::iq2_s::*;
 pub use quant::iq3_s::*;
+pub use quant::iq3_xxs::*;
 pub use quant::iq4::*;
 pub use quant::mxfp4::*;
+pub use quant::q2_0::*;
 pub use quant::q3_k::*;
 pub use quant::q4_0::*;
 pub use quant::q4_k::*;
 pub use quant::q8_k::*;
-pub use quant::{dequant, iq3s_grid, lay, q8k};
+pub use quant::{dequant, iq2s_grid, iq3s_grid, iq3xxs_grid, lay, q8k};
 
 /// A Q4_0 dot product, using the fastest kernel this CPU has.
 pub fn q4_0_dot(w: &[u8], x: &[Groups32]) -> f32 {

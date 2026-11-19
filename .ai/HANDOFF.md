@@ -32,6 +32,26 @@ to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B an
     attention scores/values, values stored transposed, elementwise ops on the pool). Through the server: 3.9 s for 558
     rows, 1.2 s for the 800 x 300 test image.
 
+## Flash Next UD-IQ3_XXS (this session, uncommitted)
+
+- The user's `Qwen3.8-Flash-Next\UD-IQ3_XXS` GGUF (82 GiB, 4 parts) converts and checks fine
+  (`Qwen3.8-Flash-Next-UD-IQ3_XXS.torc` next to the folder), but the server panicked with "no kernel" for three of its
+  tensor types, so the fork got Arm64 NEON kernels for them: IQ3_XXS (ggml 18, 42 tensors), IQ2_S (22, 52 tensors) and
+  Q2_0 (42, 3 tensors: down of layers 8, 10, 13; 64 weights per block, levels -1..+2 times d). Tallied with a small node
+  script over the GGUF headers; the converter already knew the sizes of all three.
+- Files: `kernels/src/quant/{iq2_s,iq2s_grid,iq3_xxs,iq3xxs_grid,q2_0}.rs` (tables copied mechanically from llama.cpp's
+  `ggml-common.h`), `dequant.rs` (reference arms + geometry), `platform/cpu/neon.rs` (`iq3xxs_matmul`, `iq2s_matmul`,
+  `q2_0_matmul`), `model/src/layers/moe.rs` (dispatch), `kernels/tests/parity.rs` (the three types in `TYPES`, plus three
+  tests that compare the dequantiser with a line-by-line copy of ggml's loop).
+- Verified: `cargo test --release --workspace --features torc-model/gpu` passes; live on the model (port 8083, NPU, no MTP,
+  thinking off): "391; Paris" and a correct Fibonacci function, about 7.7 tokens/s decode, first request 9 s.
+- Not done: x86 kernels (the types panic with "no kernel" there; the parity table gates them on aarch64), a numeric
+  comparison with llama.cpp's output on this model, MTP drafts (`mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf` in Draft Models,
+  untested with ToRc), vision. The launcher is `Documents\Models\Start ToRc Qwen3.8-Flash-Next.bat` (port 8083, 32K
+  context). The model needs 31 GiB resident plus 51 GiB of experts on a 48 GB machine, so it pages.
+- Found on the way: a `torc-server.exe` built without `--features torc-model/gpu` prints "TORC_GPU_ATTN is set, but this
+  build has no GPU tier"; always build the workspace with the feature (the launchers set `TORC_GPU_ATTN`).
+
 ## Files Changed
 
 Streaming / idle / reply limit (earlier work):

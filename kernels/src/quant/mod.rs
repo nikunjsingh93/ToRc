@@ -3,10 +3,15 @@
 
 pub mod dequant;
 pub mod f16;
+pub mod iq2_s;
+pub mod iq2s_grid;
 pub mod iq3_s;
+pub mod iq3_xxs;
 pub mod iq3s_grid;
+pub mod iq3xxs_grid;
 pub mod iq4;
 pub mod mxfp4;
+pub mod q2_0;
 pub mod q3_k;
 pub mod q4_0;
 pub mod q4_k;
