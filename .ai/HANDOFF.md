@@ -34,6 +34,8 @@ to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B an
 
 ## Flash Next UD-IQ3_XXS (committed: de734a8 kernels, ed31dcc MTP)
 
+Update 2026-11-20: the user removed the model, the MTP file and the launcher from this machine (too heavy for 48 GB; the GGUFs were deleted earlier). Everything below is history plus how to redo it; the kernels and the opt-in MTP stay in the code. Also tried: TORC_TAIL_SKIP 8 and 4 (4 read a 6K prompt 47% faster but changed the answers; 8 did nothing), not kept.
+
 - The user's `Qwen3.8-Flash-Next\UD-IQ3_XXS` GGUF (82 GiB, 4 parts) converts and checks fine
   (`Qwen3.8-Flash-Next-UD-IQ3_XXS.torc` next to the folder), but the server panicked with "no kernel" for three of its
   tensor types, so the fork got Arm64 NEON kernels for them: IQ3_XXS (ggml 18, 42 tensors), IQ2_S (22, 52 tensors) and

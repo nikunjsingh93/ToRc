@@ -150,14 +150,16 @@ Run from the repository root (PowerShell; `$env:USERPROFILE\.cargo\bin` must be 
   `set "TORC_MMPROJ=%USERPROFILE%\Documents\Models\Qwen3.6-35B\mmproj-Qwen3.6-35B-A3B-BF16.gguf"` (the mmproj is from
   lmstudio-community/Qwen3.6-35B-A3B-GGUF). Both launchers now set `TORC_MMPROJ` (the 27B uses
   `Qwen3.8-27Bmmproj-Qwen3.8-27B-F16.gguf`; remove the line to turn images off).
-- Flash Next (`Start ToRc Qwen3.8-Flash-Next.bat`, port 8083): `Documents\Models\Qwen3.8-Flash-Next\Qwen3.8-Flash-Next-UD-IQ3_XXS.torc`
-  (82 GiB, converted from the 4-part UD-IQ3_XXS GGUF; it pages on this 48 GB machine) with its MTP block
-  `Documents\Models\Draft Models\mtp-Qwen3.8-Flash-Next-Q4_K_M.torc` (`TORC_MTP_FILE`, `TORC_MTP=3`). It needs the
-  fork's IQ3_XXS, IQ2_S and Q2_0 kernels (Arm64 only). About 11.7 tokens/s writing with MTP, 7.7 without; long prompts
-  are slow to read because every block of tokens pages the experts. Server timings are in HANDOFF.md.
+- Flash Next (Qwen3.8 Flash Next UD-IQ3_XXS, 82 GiB) was run here on port 8083 and **removed on 2026-11-20**: its model, MTP
+  file and launcher are deleted, as too heavy for this 48 GB laptop (the experts page from disk, a first request took about
+  3 minutes to load, and an agent app's first prompt took several minutes more). The fork's IQ3_XXS, IQ2_S and Q2_0
+  kernels and the opt-in one-machine MTP (`TORC_MTP` + `TORC_MTP_FILE`) stay in the code. To bring it back: download the
+  GGUF and its MTP GGUF, convert both with `torc convert-gguf`, and use the settings and numbers in HANDOFF.md.
 - Ornith 1.5 35B (`Start ToRc Ornith-1.5-35B.bat`, port 8084): qwen35moe like the Qwen3.6 35B, Q4_K_M converted to `Documents\Models\Ornith-1.5-35B\Ornith-1.5-35B-Q4_K_M.torc` (20 GiB, both checks pass), with its BF16 mmproj for images. Tested live: 391 correct, an invoice image read fully with the right colours; MTP drafts on by default; about 68 tokens/s writing text, 60 with an image, no long-prompt timing taken.
-- Models are converted `.torc` files in the upstream release zip's `models` folder (Qwen_Qwen3.6-35B-A3B-Q4_0.torc,
-  Qwen3.8-27B-Q4_0.torc). Auto-tune results live in `%LOCALAPPDATA%\torc\tune`.
+- Models are converted `.torc` files, each in its own folder under `%USERPROFILE%\Documents\Models\<model name>\` together
+  with its mmproj GGUF (moved there from the upstream app's `models` folder on 2026-11-19; the vision projector stays a GGUF,
+  ToRc reads it directly). The llama.cpp launchers and the other GGUFs were deleted. Auto-tune results live in
+  `%LOCALAPPDATA%\torc\tune`.
 - Measured on this machine (8.4K-token coding prompt, server timings): 35B Q4_0 with NPU + GPU + MTP read about
   418 tok/s and wrote 69-82 tok/s, against llama.cpp b12119 CPU at 148.5 / 26.8 on the Q4_K_M file. Q4_0 lets the
   NPU take far more work than Q4_K_M (896 MiB vs 205 MiB of dense products).
