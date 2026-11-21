@@ -32,6 +32,21 @@ to origin (github.com/nikunjsingh93/ToRc). The user's two ToRc launchers (35B an
     attention scores/values, values stored transposed, elementwise ops on the pool). Through the server: 3.9 s for 558
     rows, 1.2 s for the 800 x 300 test image.
 
+## Thinking levels (2026-11-20, uncommitted until asked)
+
+`torc-server` now has low / medium / high reasoning levels for the Qwen format (Qwen3.x, Ornith). Low and medium are caps on the
+reasoning's tokens (`TORC_THINK_LOW` 256, `TORC_THINK_MEDIUM` 1536; high or no level is uncapped), and a request can name its
+own budget (`thinking_budget_tokens` and aliases, Anthropic `thinking.budget_tokens`). `api::think_budget` turns a request into
+`Chat::think_budget`; `qwen/serve.rs` `run_seq` ends the reply with the finish reason "think_cap" at the budget (the token that
+would be next is not run, as at a stop token), and `reply_calls` then runs a second `run` whose prompt is the same sequence plus
+the reasoning's own token ids plus `\n</think>\n\n`, so the kept sequence is still a prefix and nothing is read twice (the
+reply's kept tokens, turns, replies and timings are restored/summed). `/v1/models` lists `supports_reasoning` and
+`reasoning_effort_levels` (`Serve::effort_levels`, and `effort_levels_of(path)` for the supervisor while unloaded) so apps like
+JoltDesk can offer the levels. Tested live on Ornith (MTP on): same prompt, no budget: 5,284 chars of reasoning, first answer at
+29 s; budget 60: answer at 1.0 s; low: 3.4 s; medium capped at 1536 tokens (4,137 chars, 22 s); high identical to no budget;
+non-streaming reports exactly 256 reasoning tokens for low; a follow-up turn after a capped reply works. Not done: caps for the
+GLM, LFM2, ERNIE and Moonlight formats (Qwen format only), a test of the cap with tool calls in the same reply, and a real
+JoltDesk session with the levels showing.
 ## Flash Next UD-IQ3_XXS (committed: de734a8 kernels, ed31dcc MTP)
 
 Update 2026-11-20: the user removed the model, the MTP file and the launcher from this machine (too heavy for 48 GB; the GGUFs were deleted earlier). Everything below is history plus how to redo it; the kernels and the opt-in MTP stay in the code. Also tried: TORC_TAIL_SKIP 8 and 4 (4 read a 6K prompt 47% faster but changed the answers; 8 did nothing), not kept.

@@ -182,9 +182,19 @@ fn route(path: &str) -> String {
     }
 }
 
-/// The loaded model as /v1/models lists it.
+/// The reasoning effort levels the model takes (set once, from the engine or, in the supervisor, from the file).
+static LEVELS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+/// The loaded model as /v1/models lists it. A model that reasons also lists its effort levels, which is how apps
+/// that look for them (JoltDesk reads `reasoning_effort_levels`) know to offer them.
 fn model_entry(name: &str) -> Value {
-    json!({"id": name, "object": "model", "created": CREATED.get().copied().unwrap_or(0), "owned_by": "torc"})
+    let mut m =
+        json!({"id": name, "object": "model", "created": CREATED.get().copied().unwrap_or(0), "owned_by": "torc"});
+    if let Some(levels) = LEVELS.get().filter(|l| !l.is_empty()) {
+        m["supports_reasoning"] = json!(true);
+        m["reasoning_effort_levels"] = json!(levels);
+    }
+    m
 }
 
 /// A path segment with its %XX escapes undone ("Llama%203" is "Llama 3"); a bad escape is kept as written.
@@ -664,6 +674,7 @@ fn main() {
     };
     // the pinning torc-tune chose for this model on this machine, now that its tune file can be found
     model::pool::apply_tuned_pin();
+    let _ = LEVELS.set(e.effort_levels());
     listen(&mut *e, port);
 }
 
@@ -720,6 +731,19 @@ type ModelProcess = Option<(std::process::Child, u16)>;
 /// no model is loaded, and runs the model in a child torc-server on a private local port, started by the first request
 /// that needs it and ended after `idle` seconds without one. Ending the process is what gives back everything the model
 /// holds, the NPU's buffers included. Requests go through unchanged, one at a time, as the server takes them.
+/// The effort levels a model file offers, read from its metadata (the supervisor lists the model before it is loaded,
+/// and says the same as the loaded engine does).
+fn levels_of_file(path: &str) -> Vec<&'static str> {
+    let arch = format::read::Model::open(path)
+        .ok()
+        .and_then(|f| format::meta::Meta::parse(&f.metadata).ok())
+        .and_then(|mm| mm.str("general.architecture").map(str::to_string));
+    match arch.as_deref() {
+        Some("gpt-oss") => model::api::EFFORT_LEVELS.to_vec(),
+        Some("gemma4") => Vec::new(),
+        _ => model::models::qwen::serve::effort_levels_of(path),
+    }
+}
 fn supervise(a: &[String], port: u16, idle: u64) {
     let host = model::switches::get("TORC_HOST").unwrap_or_else(|| "127.0.0.1".into());
     let key = model::switches::get("TORC_API_KEY").map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
@@ -734,6 +758,7 @@ fn supervise(a: &[String], port: u16, idle: u64) {
     let written = std::fs::metadata(&a[1]).and_then(|m| m.modified()).ok();
     let since = written.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
     let _ = CREATED.set(since);
+    let _ = LEVELS.set(levels_of_file(&a[1]));
     let needs = if key.is_some() { ", other machines need the API key" } else { "" };
     eprintln!("torc-server: {name} on {host}:{port}{needs}");
     eprintln!("torc-server: the model loads on the first request and unloads after {idle} s without one");

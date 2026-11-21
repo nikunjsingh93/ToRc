@@ -87,6 +87,7 @@ pub fn from_messages(req: &Value) -> Chat {
         stream: req["stream"].as_bool().unwrap_or(false),
         think,
         effort: None,
+        think_budget: super::think_budget(None, req["thinking"]["budget_tokens"].as_u64()),
         show_reasoning: think == Some(true),
         temperature: req["temperature"].as_f64().unwrap_or(0.0) as f32,
         top_p: req["top_p"].as_f64().unwrap_or(1.0) as f32,

@@ -35,6 +35,10 @@ struct Engine {
 }
 
 impl Serve for Engine {
+    fn effort_levels(&self) -> Vec<&'static str> {
+        crate::api::EFFORT_LEVELS.to_vec()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

@@ -77,6 +77,7 @@ pub fn from_responses(req: &Value) -> Chat {
         stream: req["stream"].as_bool().unwrap_or(false),
         think,
         effort: req["reasoning"]["effort"].as_str().map(str::to_string),
+        think_budget: super::think_budget(req["reasoning"]["effort"].as_str(), None),
         show_reasoning: think != Some(false) && req["reasoning"]["summary"].is_string(),
         temperature: req["temperature"].as_f64().unwrap_or(0.0) as f32,
         top_p: req["top_p"].as_f64().unwrap_or(1.0) as f32,

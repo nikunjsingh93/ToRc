@@ -405,19 +405,26 @@ impl Engine {
     /// does. With `think` the reply starts as reasoning: the <think> tag is dropped, and </think> ends it (that tag is
     /// dropped too, along with the blank line after it). Returns the prompt tokens, reply tokens, reasoning tokens, the
     /// finish reason and the bodies of any tool calls made.
+    ///
+    /// `cap` is the most reasoning tokens the reply may write: at that many the reply ends early with the finish
+    /// reason "think_cap", the token that would have been the next not run (as at a stop token), for reply_calls to
+    /// close the block and go on. `extra` is token ids that follow the opener in the prompt (the reasoning so far, and
+    /// its closing, when it goes on).
     fn run(
         &mut self,
         base: &str,
         opener: &str,
         max: usize,
         think: bool,
+        cap: Option<usize>,
+        extra: &[u32],
         sp: &mut Sampling,
         emit: &mut dyn FnMut(bool, &str) -> bool,
         tools: &[Value],
         on_call: &mut dyn FnMut(CallPiece) -> bool,
     ) -> format::Result<(usize, usize, usize, &'static str, Vec<String>)> {
         self.touched = false;
-        let r = self.run_seq(base, opener, max, think, sp, emit, tools, on_call);
+        let r = self.run_seq(base, opener, max, think, cap, extra, sp, emit, tools, on_call);
         if let Err(e) = &r
             && self.touched
         {
@@ -527,6 +534,8 @@ impl Engine {
         opener: &str,
         max: usize,
         think: bool,
+        cap: Option<usize>,
+        extra: &[u32],
         sp: &mut Sampling,
         emit: &mut dyn FnMut(bool, &str) -> bool,
         tools: &[Value],
@@ -540,6 +549,7 @@ impl Engine {
         }
         let mut ids = bt.clone();
         ids.extend(self.tok.encode(opener, true)?);
+        ids.extend_from_slice(extra);
         // where the images sit, for the positions the attention layers rotate by
         vision::set_positions(&ids);
         let nd = self.tok.take_dropped();
@@ -807,6 +817,12 @@ impl Engine {
                 reason = "stop";
                 break;
             }
+            // the reasoning has taken its budget and the model is not closing it itself: end here, with t not run, and
+            // let reply_calls close the block (a model that writes its </think> at the budget is let finish)
+            if inside && Some(t) != self.reason_end && cap.is_some_and(|b| nthink >= b) {
+                reason = "think_cap";
+                break;
+            }
             if inside {
                 nthink += 1;
             }
@@ -1008,6 +1024,10 @@ impl Engine {
 }
 
 impl Serve for Engine {
+    fn effort_levels(&self) -> Vec<&'static str> {
+        if self.reasons && chat() == Chat::Qwen { api::EFFORT_LEVELS.to_vec() } else { Vec::new() }
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1054,8 +1074,30 @@ impl Serve for Engine {
         } else {
             "<think>\n\n</think>\n\n"
         };
-        let (prompt, output, reasoning, finish, calls) =
-            self.run(&text, opener, c.max, think, &mut sp, emit, &c.tools, on_call)?;
+        // the reasoning's budget (the request's effort level or its own number of tokens), for the Qwen format only
+        let cap = if think && chat() == Chat::Qwen && self.reason_end.is_some() { c.think_budget } else { None };
+        let (prompt, mut output, reasoning, mut finish, mut calls) =
+            self.run(&text, opener, c.max, think, cap, &[], &mut sp, emit, &c.tools, on_call)?;
+        if finish == "think_cap" {
+            // the reasoning reached its budget: the block is closed for the model, and the reply goes on as a request
+            // that extends what was read (the reasoning's own tokens, then the closing), so nothing is read again.
+            // The reply counts as one: its prompt, kept tokens, turn and timings are the first run's, with the
+            // tokens and the time of the rest added
+            let (kept, replies, turns, (total, prompt_s, ttft_s, n1, secs1)) =
+                (self.kept, self.replies, self.turns, self.timed);
+            let mut extra = self.seen[prompt.min(self.seen.len())..].to_vec();
+            extra.extend(self.tok.encode("\n</think>\n\n", true)?);
+            eprintln!("torc-server: the reasoning took its budget of {} tokens; closed", cap.unwrap_or(0));
+            let left = c.max.saturating_sub(output);
+            let (_, o2, _, f2, c2) =
+                self.run(&text, opener, left, false, None, &extra, &mut sp, emit, &c.tools, on_call)?;
+            let (_, _, _, n2, secs2) = self.timed;
+            (self.kept, self.replies, self.turns, self.timed) =
+                (kept, replies, turns, (total, prompt_s, ttft_s, n1 + n2, secs1 + secs2));
+            output += o2;
+            finish = f2;
+            calls = c2;
+        }
         let calls = match chat() {
             Chat::Qwen => super::chat::read(&calls, &c.tools),
             Chat::Glm => crate::models::glm::chat::read(&calls, &c.tools),
@@ -1084,6 +1126,22 @@ impl Serve for Engine {
     }
 }
 
+/// The effort levels a file offers without loading it (what Engine::effort_levels says once it is loaded): the Qwen
+/// format's models that reason, judged by how their chat template opens a reply as `open` judges it. For the
+/// supervisor's /v1/models while the model is unloaded.
+pub fn effort_levels_of(path: &str) -> Vec<&'static str> {
+    let meta = format::read::Model::open(path).ok().and_then(|f| format::meta::Meta::parse(&f.metadata).ok());
+    let Some(mm) = meta else { return Vec::new() };
+    let other = matches!(
+        (mm.str("general.architecture"), mm.str("tokenizer.ggml.pre")),
+        (Some("ernie4_5-moe" | "lfm2moe"), _) | (Some("deepseek2"), _)
+    );
+    let reasons = mm
+        .str("tokenizer.chat_template")
+        .map(|t| t.rsplit("add_generation_prompt").next().unwrap_or("").contains("<think>"))
+        .unwrap_or(true);
+    if reasons && !other { api::EFFORT_LEVELS.to_vec() } else { Vec::new() }
+}
 /// Loads a Qwen-family file for torc-server: the worker pool is up already, `ctx` is the context length and `name`
 /// the name it is served under (the file's own when None).
 pub fn open(path: &str, ctx: usize, name: Option<String>) -> Box<dyn Serve> {

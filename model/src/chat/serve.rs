@@ -133,6 +133,12 @@ pub trait Serve {
     /// The model's name, as /v1/models lists it.
     fn name(&self) -> &str;
 
+    /// The reasoning effort levels a request may name for this model, as /v1/models lists them (none for a model that
+    /// doesn't reason, or that takes only on and off).
+    fn effort_levels(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// The request's prompt in tokens.
     fn count(&self, c: &Chat) -> usize;
 

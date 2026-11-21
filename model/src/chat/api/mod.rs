@@ -44,6 +44,8 @@ pub struct Chat {
     pub think: Option<bool>,
     /// the reasoning effort the request named ("low", "medium", "high"), for a model that takes one
     pub effort: Option<String>,
+    /// the most tokens of reasoning the request allows (see [`think_budget`]); None is no limit
+    pub think_budget: Option<usize>,
     /// whether the reasoning is sent to the client (otherwise it is generated but not sent)
     pub show_reasoning: bool,
     pub temperature: f32,
@@ -97,6 +99,28 @@ fn with_system(system: Vec<String>, mut msgs: Vec<Value>) -> Vec<Value> {
     msgs
 }
 
+/// The reasoning effort levels a model that reasons offers (as /v1/models lists them): low and medium cap its
+/// reasoning (see [`think_budget`]), high leaves it alone.
+pub const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
+
+/// The most tokens of reasoning a request allows. A budget the request names itself (`thinking_budget_tokens` and its
+/// aliases, Anthropic's `thinking.budget_tokens`) is used as given. Otherwise the effort level decides: "low" and
+/// "medium" are caps (TORC_THINK_LOW, default 256, and TORC_THINK_MEDIUM, default 1536; 0 turns a cap off), anything
+/// else - "high" and above, or no effort at all - is no cap. The cap only ends reasoning early (the server closes the
+/// thinking block); it never makes a model reason longer.
+pub fn think_budget(effort: Option<&str>, named: Option<u64>) -> Option<usize> {
+    if let Some(n) = named.filter(|&n| n > 0) {
+        return Some(n as usize);
+    }
+    let cap = |var: &str, default: usize| crate::switches::num::<usize>(var).unwrap_or(default);
+    match effort? {
+        "low" => Some(cap("TORC_THINK_LOW", 256)),
+        "medium" => Some(cap("TORC_THINK_MEDIUM", 1536)),
+        _ => None,
+    }
+    .filter(|&n| n > 0)
+}
+
 /// A chat completions request as a [`Chat`] (the servers' own endpoint, so all three APIs reach the model the same
 /// way).
 pub fn from_chat_completions(req: &Value) -> Chat {
@@ -109,16 +133,19 @@ pub fn from_chat_completions(req: &Value) -> Chat {
     } else {
         None
     });
+    let effort = req["reasoning_effort"].as_str().or(req["chat_template_kwargs"]["reasoning_effort"].as_str());
+    // a budget named in tokens, under the names clients use for it
+    let named = ["thinking_budget_tokens", "thinking_token_budget", "thinking_budget", "reasoning_budget_tokens"]
+        .iter()
+        .find_map(|k| req[*k].as_u64().filter(|&n| n > 0));
     Chat {
         msgs: req["messages"].as_array().cloned().unwrap_or_default(),
         tools: req["tools"].as_array().cloned().unwrap_or_default(),
         max: req["max_tokens"].as_u64().or(req["max_completion_tokens"].as_u64()).unwrap_or_else(default_max) as usize,
         stream: req["stream"].as_bool().unwrap_or(false),
         think,
-        effort: req["reasoning_effort"]
-            .as_str()
-            .or(req["chat_template_kwargs"]["reasoning_effort"].as_str())
-            .map(str::to_string),
+        effort: effort.map(str::to_string),
+        think_budget: think_budget(effort, named),
         show_reasoning: true,
         temperature: req["temperature"].as_f64().unwrap_or(0.0) as f32,
         top_p: req["top_p"].as_f64().unwrap_or(1.0) as f32,
@@ -207,6 +234,37 @@ mod tests {
         );
         assert_eq!(c.tools.len(), 1);
         assert_eq!((c.think, c.show_reasoning), (Some(true), false));
+    }
+
+    #[test]
+    fn reasoning_budget() {
+        // a budget the request names wins over its level
+        let c =
+            from_chat_completions(&json!({"messages": [], "reasoning_effort": "low", "thinking_budget_tokens": 700}));
+        assert_eq!(c.think_budget, Some(700));
+        // the aliases clients use
+        for k in ["thinking_token_budget", "thinking_budget", "reasoning_budget_tokens"] {
+            let c = from_chat_completions(&json!({"messages": [], k: 900}));
+            assert_eq!(c.think_budget, Some(900), "{k}");
+        }
+        // low and medium are caps, high and no level are not
+        let by = |e: Option<&str>| think_budget(e, None);
+        assert_eq!(by(Some("low")), Some(256));
+        assert_eq!(by(Some("medium")), Some(1536));
+        assert_eq!((by(Some("high")), by(Some("xhigh")), by(None)), (None, None, None));
+        let c = from_chat_completions(&json!({"messages": [], "chat_template_kwargs": {"reasoning_effort": "medium"}}));
+        assert_eq!(c.think_budget, Some(1536));
+        // off is still off, with no budget; a budget of 0 is off too
+        let c = from_chat_completions(&json!({"messages": [], "reasoning_effort": "minimal"}));
+        assert_eq!((c.think, c.think_budget), (Some(false), None));
+        let c = from_chat_completions(&json!({"messages": [], "reasoning_budget_tokens": 0}));
+        assert_eq!((c.think, c.think_budget), (Some(false), None));
+        // the other two APIs
+        let c = from_messages(&json!({"model": "x", "max_tokens": 10, "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 1000}}));
+        assert_eq!(c.think_budget, Some(1000));
+        let c = from_responses(&json!({"model": "x", "input": [], "reasoning": {"effort": "low"}}));
+        assert_eq!(c.think_budget, Some(256));
     }
 
     fn events(s: &str) -> Vec<Value> {
